@@ -128,6 +128,7 @@ main{max-width:1140px;margin:0 auto;padding:1.5rem 1.25rem}
 .soon-today{background:#E53935;color:#fff}
 .soon-tomorrow{background:#F4511E;color:#fff}
 .soon-days{background:#D4A017;color:#fff}
+.soon-blockers{font-size:10.5px;color:var(--red-text);background:var(--red-bg);padding:1px 7px;border-radius:20px;white-space:nowrap}
 .cc-date-warn{font-size:11px;margin-bottom:9px;display:flex;align-items:center;gap:5px}
 .archive-banner{display:flex;align-items:center;gap:8px;background:var(--surface2);border:0.5px solid var(--border);border-radius:var(--rl);padding:10px 14px;margin-bottom:1rem;font-size:13px;color:var(--text2);cursor:pointer;transition:background .15s}
 .archive-banner:hover{background:var(--surface3,#e0deda)}
@@ -558,9 +559,26 @@ function saveLink(name,url){if(!ST.driveLinks)ST.driveLinks={};if(url)ST.driveLi
 function driveSearchUrl(name){return"https://drive.google.com/drive/search?q="+encodeURIComponent(name);}
 function getLink(name){return getSavedLink(name)||driveSearchUrl(name);}
 function isCustomLink(name){return!!getSavedLink(name);}
-function parseStart(s){if(!s)return null;const mo={Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};const m=s.match(/([A-Za-z]+)\s+(\d+)/);if(!m)return null;return new Date(new Date().getFullYear(),mo[m[1]],+m[2]);}
+// How many days ahead of a start date the dashboard begins warning.
+const START_WARNING_DAYS=5;
+function parseStart(s){
+  if(!s)return null;
+  const mo={jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+  const m=s.match(/([A-Za-z]+)\s*(\d+)/);
+  if(!m)return null;
+  const mi=mo[m[1].slice(0,3).toLowerCase()];   // tolerate "may", "MAY", "September"
+  if(mi===undefined)return null;
+  const today=new Date();today.setHours(0,0,0,0);
+  let d=new Date(today.getFullYear(),mi,+m[2]);
+  // Start dates carry no year, so "Jan 12" entered in August means next January.
+  // Roll forward only when the date is far enough back that it can't plausibly
+  // be a recent start — otherwise a client who began two months ago would get
+  // treated as starting again next year.
+  if((today-d)/864e5>183)d=new Date(today.getFullYear()+1,mi,+m[2]);
+  return d;
+}
 function daysUntil(s){const d=parseStart(s);if(!d)return null;const t=new Date();t.setHours(0,0,0,0);return Math.round((d-t)/(864e5));}
-function startWarningInfo(s){const d=daysUntil(s);if(d===null||d<0||d>5)return null;if(d===0)return{label:"Today",cls:"soon-today"};if(d===1)return{label:"Tomorrow",cls:"soon-tomorrow"};return{label:`In ${d} days`,cls:"soon-days"};}
+function startWarningInfo(s){const d=daysUntil(s);if(d===null||d<0||d>START_WARNING_DAYS)return null;if(d===0)return{label:"Today",cls:"soon-today"};if(d===1)return{label:"Tomorrow",cls:"soon-tomorrow"};return{label:`In ${d} days`,cls:"soon-days"};}
 function startedOrStarts(s){const d=daysUntil(s);if(d===null)return"";return d<0?"Started":"Starts";}
 function driveSvg(cls){return`<svg class="${cls}" viewBox="0 0 87.3 78" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="m6.6 66.85 3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8h-27.5c0 1.55.4 3.1 1.2 4.5z" fill="#0066da"/><path d="m43.65 25-13.75-23.8c-1.35.8-2.5 1.9-3.3 3.3l-25.4 44a9.06 9.06 0 0 0 -1.2 4.5h27.5z" fill="#00ac47"/><path d="m73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5h-27.502l5.852 11.5z" fill="#ea4335"/><path d="m43.65 25 13.75-23.8c-1.35-.8-2.9-1.2-4.5-1.2h-18.5c-1.6 0-3.15.45-4.5 1.2z" fill="#00832d"/><path d="m59.8 53h-32.3l-13.75 23.8c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.45 4.5-1.2z" fill="#2684fc"/><path d="m73.4 26.5-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3l-13.75 23.8 16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#ffba00"/></svg>`;}
 function partnerColor(){return partner==="neil"?"var(--neil)":"var(--jacob)";}
@@ -647,8 +665,8 @@ function renderDashboard(m){
   const pname=partner==="neil"?"Neil":"Jacob";
   const badge=`<span class="partner-badge badge-${partner}">${pname}</span>`;
   const partnerTags=allTagsForPartner();
-  const upcoming=clients().map((c,ci)=>({c,ci,warn:startWarningInfo(c.start)})).filter(x=>x.warn&&!x.c.archived);
-  if(upcoming.length){const wb=document.createElement("div");wb.className="start-warning-banner";wb.innerHTML=`<i class="ti ti-clock-exclamation" style="font-size:18px;flex-shrink:0;margin-top:1px" aria-hidden="true"></i><div><strong>${upcoming.length} client${upcoming.length>1?"s":""} starting soon</strong><ul>${upcoming.map(({c,warn})=>`<li><span class="soon-badge ${warn.cls}">${warn.label}</span>${c.name}</li>`).join("")}</ul></div>`;wb.querySelectorAll("li").forEach((li,i)=>{li.style.cursor="pointer";li.addEventListener("click",()=>setView("client",upcoming[i].ci));});m.appendChild(wb);}
+  const upcoming=clients().map((c,ci)=>({c,ci,warn:startWarningInfo(c.start)})).filter(x=>x.warn&&!x.c.archived).sort((a,b)=>daysUntil(a.c.start)-daysUntil(b.c.start));
+  if(upcoming.length){const wb=document.createElement("div");wb.className="start-warning-banner";wb.innerHTML=`<i class="ti ti-clock-exclamation" style="font-size:18px;flex-shrink:0;margin-top:1px" aria-hidden="true"></i><div><strong>${upcoming.length} client${upcoming.length>1?"s":""} starting soon</strong><ul>${upcoming.map(({c,ci,warn})=>{const nb=pendingBlockers(ci).length;return `<li><span class="soon-badge ${warn.cls}">${warn.label}</span>${escHtml(c.name)}${nb?`<span class="soon-blockers">${nb} blocker${nb>1?"s":""} pending</span>`:""}</li>`;}).join("")}</ul></div>`;wb.querySelectorAll("li").forEach((li,i)=>{li.style.cursor="pointer";li.addEventListener("click",()=>setView("client",upcoming[i].ci));});m.appendChild(wb);}
   if(partnerTags.length){const tfb=document.createElement("div");tfb.className="tag-filter-bar";tfb.innerHTML=`<span class="tag-filter-label">Filter by tag</span>`;partnerTags.forEach(t=>{const btn=document.createElement("button");btn.className="tag-filter-btn"+(activeTagFilters.has(t.id)?" active":"");if(activeTagFilters.has(t.id))btn.style.cssText=`background:${t.color};color:#fff;border-color:${t.color}`;btn.innerHTML=`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${t.color};margin-right:4px;vertical-align:1px"></span>${t.name}`;btn.addEventListener("click",()=>{if(activeTagFilters.has(t.id))activeTagFilters.delete(t.id);else activeTagFilters.add(t.id);const mm=document.getElementById("main");mm.innerHTML="";renderDashboard(mm);});tfb.appendChild(btn);});if(activeTagFilters.size){const clr=document.createElement("button");clr.className="tag-filter-btn clear-tags";clr.textContent="✕ Clear filters";clr.addEventListener("click",()=>{activeTagFilters=new Set();const mm=document.getElementById("main");mm.innerHTML="";renderDashboard(mm);});tfb.appendChild(clr);}m.appendChild(tfb);}
   let h=document.createElement("div");h.className="dash-section-hd";h.innerHTML=`<h2>Clients ${badge}</h2><div class="divider"></div>`;m.appendChild(h);
   const grid=document.createElement("div");grid.className="dash-grid";
