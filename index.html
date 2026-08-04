@@ -379,9 +379,10 @@ const DEFAULT_STATE={
   phases:JSON.parse(JSON.stringify(DEFAULT_PHASES))
 };
 
-// Set to true by migrateState() when it finds and removes stale task ids, so we
-// can write the cleaned-up state back to Firebase once on load.
-let _prunedOnLoad=false;
+// Set to true by migrateState() when it normalizes the stored data (removing
+// stale task ids, seeding per-client blockers), so the cleaned-up state gets
+// written back to Firebase once on load.
+let _needsRewrite=false;
 
 function migrateState(p){
   try{
@@ -411,11 +412,31 @@ function migrateState(p){
     [...p.neil.clients,...p.jacob.clients].forEach(c=>{
       const before=c.checked.length;
       c.checked=[...new Set(c.checked.filter(id=>validIds.has(id)))];
-      if(c.checked.length!==before)_prunedOnLoad=true;
+      if(c.checked.length!==before)_needsRewrite=true;
     });
     const tplBefore=p.template.length;
     p.template=[...new Set(p.template.filter(id=>validIds.has(id)&&!TEMPLATE_EXCLUDE.has(id)))];
-    if(p.template.length!==tplBefore)_prunedOnLoad=true;
+    if(p.template.length!==tplBefore)_needsRewrite=true;
+
+    // ── Per-client blockers ───────────────────────────────────────────────────
+    // Blockers used to live on the task itself, which made them global. They're
+    // now a per-client list. Clients that predate this get seeded from the old
+    // task-level flags so nothing changes visually on first load. `blockersSet`
+    // is the marker that seeding already happened — Firebase drops empty arrays,
+    // so an empty `blockers` would otherwise look identical to "never seeded"
+    // and the defaults would come back every reload.
+    const defaultBlockerIds=p.phases.flatMap(ph=>ph.tasks.filter(t=>t.blocker).map(t=>t.id));
+    [...p.neil.clients,...p.jacob.clients].forEach(c=>{
+      if(!c.blockersSet){
+        c.blockers=defaultBlockerIds.slice();
+        c.blockersSet=true;
+        _needsRewrite=true;
+      }else{
+        const before=toArr(c.blockers).length;
+        c.blockers=[...new Set(toArr(c.blockers).filter(id=>validIds.has(id)))];
+        if(c.blockers.length!==before)_needsRewrite=true;
+      }
+    });
   }catch(e){console.error("migrate error",e);}
   return p;
 }
@@ -464,7 +485,7 @@ function startApp(){
       ST.phases.forEach(p=>openPhases[p.id]=true);
       render();
       // Persist the cleanup so the stale ids don't come back on the next load.
-      if(_prunedOnLoad){_prunedOnLoad=false;save();}
+      if(_needsRewrite){_needsRewrite=false;save();}
     } else {
       const anyFocused=document.activeElement&&(document.activeElement.tagName==="INPUT"||document.activeElement.tagName==="TEXTAREA");
       if(!anyFocused){
@@ -550,7 +571,9 @@ function doneCount(ci){const valid=validTaskIds();return clients()[ci].checked.f
 function pct(ci){const t=totalTasks();if(!t)return 0;return Math.min(100,Math.round(doneCount(ci)/t*100));}
 function hasChecked(ci,tid){return clients()[ci].checked.includes(tid);}
 function toggle(ci,tid){const c=clients()[ci];const i=c.checked.indexOf(tid);if(i>=0)c.checked.splice(i,1);else c.checked.push(tid);save();}
-function pendingBlockers(ci){return ST.phases.flatMap(p=>p.tasks.filter(t=>t.blocker&&!hasChecked(ci,t.id)));}
+function isBlocker(ci,tid){const b=clients()[ci].blockers;return Array.isArray(b)&&b.includes(tid);}
+function toggleBlocker(ci,tid){const c=clients()[ci];if(!Array.isArray(c.blockers))c.blockers=[];const i=c.blockers.indexOf(tid);if(i>=0)c.blockers.splice(i,1);else c.blockers.push(tid);c.blockersSet=true;save();}
+function pendingBlockers(ci){return ST.phases.flatMap(p=>p.tasks.filter(t=>isBlocker(ci,t.id)&&!hasChecked(ci,t.id)));}
 
 // Unchecked tasks for a client, grouped by whoever owns them. Returns entries in
 // OWNERS order first, then any legacy owner values, so the chips stay stable.
@@ -569,7 +592,10 @@ function outstandingByOwner(ci){
 // Called whenever tasks stop existing, so nothing is orphaned in the first place.
 function forgetTaskIds(ids){
   const drop=new Set(ids);
-  [...ST.neil.clients,...ST.jacob.clients].forEach(c=>{c.checked=c.checked.filter(id=>!drop.has(id));});
+  [...ST.neil.clients,...ST.jacob.clients].forEach(c=>{
+    c.checked=c.checked.filter(id=>!drop.has(id));
+    if(Array.isArray(c.blockers))c.blockers=c.blockers.filter(id=>!drop.has(id));
+  });
   ST.template=(ST.template||[]).filter(id=>!drop.has(id));
 }
 
@@ -685,7 +711,7 @@ function renderClient(m){
     let tasks=[...phase.tasks];
     if(filter==="pending")tasks=tasks.filter(t=>!hasChecked(activeCI,t.id));
     if(filter==="done")tasks=tasks.filter(t=>hasChecked(activeCI,t.id));
-    if(filter==="blocker")tasks=[...tasks.filter(t=>t.blocker&&!hasChecked(activeCI,t.id)),...tasks.filter(t=>!t.blocker||hasChecked(activeCI,t.id))];
+    if(filter==="blocker")tasks=[...tasks.filter(t=>isBlocker(activeCI,t.id)&&!hasChecked(activeCI,t.id)),...tasks.filter(t=>!isBlocker(activeCI,t.id)||hasChecked(activeCI,t.id))];
     const open=openPhases[phase.id];const phaseDone=phase.tasks.filter(t=>hasChecked(activeCI,t.id)).length;
     const block=document.createElement("div");block.className="phase-block";
     const hd=document.createElement("div");hd.className="phase-hd";
@@ -699,15 +725,15 @@ function renderClient(m){
     if(open){
       const list=document.createElement("div");list.className="task-list";
       tasks.forEach(task=>{
-        const done=hasChecked(activeCI,task.id);const row=document.createElement("div");row.className=`task-row${done?" done":""}`;row.draggable=true;
-        row.innerHTML=`<i class="ti ti-grip-vertical drag-handle" aria-hidden="true"></i><div class="task-check"><i class="ti ti-check" aria-hidden="true"></i></div><div class="task-body"><span class="task-name-text">${task.name}</span>${task.blocker && !done?'<span class="tag tag-blocker"><i class="ti ti-alert-circle" aria-hidden="true"></i> blocker</span>':""}<span class="owner-badge">${task.owner}</span></div><div class="task-actions"><button class="icon-btn" title="Edit task name" data-action="edit"><i class="ti ti-pencil" aria-hidden="true"></i></button><button class="icon-btn" title="Move to another phase" data-action="reassign"><i class="ti ti-arrows-move" aria-hidden="true"></i></button><button class="icon-btn${task.blocker?" is-red":""}" title="${task.blocker?"Remove blocker":"Mark as blocker"}" data-action="blocker"><i class="ti ti-alert-circle" aria-hidden="true"></i></button><button class="icon-btn del" title="Delete task" data-action="del"><i class="ti ti-trash" aria-hidden="true"></i></button></div>`;
+        const done=hasChecked(activeCI,task.id);const isBlk=isBlocker(activeCI,task.id);const row=document.createElement("div");row.className=`task-row${done?" done":""}`;row.draggable=true;
+        row.innerHTML=`<i class="ti ti-grip-vertical drag-handle" aria-hidden="true"></i><div class="task-check"><i class="ti ti-check" aria-hidden="true"></i></div><div class="task-body"><span class="task-name-text">${task.name}</span>${isBlk && !done?'<span class="tag tag-blocker"><i class="ti ti-alert-circle" aria-hidden="true"></i> blocker</span>':""}<span class="owner-badge">${task.owner}</span></div><div class="task-actions"><button class="icon-btn" title="Edit task name" data-action="edit"><i class="ti ti-pencil" aria-hidden="true"></i></button><button class="icon-btn" title="Move to another phase" data-action="reassign"><i class="ti ti-arrows-move" aria-hidden="true"></i></button><button class="icon-btn${isBlk?" is-red":""}" title="${isBlk?"Remove blocker for "+c.name:"Mark as blocker for "+c.name}" data-action="blocker"><i class="ti ti-alert-circle" aria-hidden="true"></i></button><button class="icon-btn del" title="Delete task" data-action="del"><i class="ti ti-trash" aria-hidden="true"></i></button></div>`;
         row.querySelector(".task-check").addEventListener("click",e=>{e.stopPropagation();toggle(activeCI,task.id);render();});
         function startEditTaskName(){const inp=document.createElement("input");inp.className="task-name-input";inp.value=task.name;row.querySelector(".task-name-text").replaceWith(inp);inp.focus();inp.select();const fin=()=>{task.name=inp.value.trim()||task.name;save();render();};inp.addEventListener("blur",fin);inp.addEventListener("keydown",e=>{if(e.key==="Enter")fin();e.stopPropagation();});}
         row.querySelector(".task-name-text").addEventListener("dblclick",startEditTaskName);
         row.querySelector("[data-action='edit']").addEventListener("click",e=>{e.stopPropagation();startEditTaskName();});
         row.querySelector(".owner-badge").addEventListener("click",e=>{e.stopPropagation();const sel=document.createElement("select");sel.className="owner-select";OWNERS.forEach(o=>{const opt=document.createElement("option");opt.value=o;opt.textContent=o;if(o===task.owner)opt.selected=true;sel.appendChild(opt);});e.target.replaceWith(sel);sel.focus();sel.addEventListener("change",()=>{task.owner=sel.value;save();render();});sel.addEventListener("blur",()=>render());});
         row.querySelector("[data-action='reassign']").addEventListener("click",e=>{e.stopPropagation();reassignTask={phaseId:phase.id,taskId:task.id};document.getElementById("mr-phase").innerHTML=ST.phases.filter(p=>p.id!==phase.id).map(p=>`<option value="${p.id}">${p.label}</option>`).join("");openModal("modal-reassign");});
-        row.querySelector("[data-action='blocker']").addEventListener("click",e=>{e.stopPropagation();task.blocker=!task.blocker;save();render();});
+        row.querySelector("[data-action='blocker']").addEventListener("click",e=>{e.stopPropagation();toggleBlocker(activeCI,task.id);render();});
         row.querySelector("[data-action='del']").addEventListener("click",e=>{e.stopPropagation();if(confirm(`Delete "${task.name}"?`)){phase.tasks=phase.tasks.filter(t=>t.id!==task.id);forgetTaskIds([task.id]);save();render();}});
         row.addEventListener("dragstart",e=>{dragSrc={phaseId:phase.id,taskId:task.id};e.dataTransfer.effectAllowed="move";setTimeout(()=>row.style.opacity="0.4",0);});
         row.addEventListener("dragend",()=>row.style.opacity="");
@@ -743,6 +769,8 @@ document.getElementById("mc-save").addEventListener("click",()=>{
     name:n,start:d||"",
     color:colors[ST[partner].clients.length%colors.length],
     checked:(ST.template||[]).filter(id=>valid.has(id)&&!TEMPLATE_EXCLUDE.has(id)),
+    blockers:ST.phases.flatMap(p=>p.tasks.filter(t=>t.blocker).map(t=>t.id)),
+    blockersSet:true,
     tags:[],archived:false
   });
   if(drv.startsWith("http"))saveLink(n,drv);
