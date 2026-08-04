@@ -68,6 +68,10 @@ main{max-width:1140px;margin:0 auto;padding:1.5rem 1.25rem}
 .cc-pct{font-size:13px;font-weight:500}
 .cc-meta{font-size:11px;color:var(--text3);margin-top:3px}
 .blocker-dot{width:6px;height:6px;border-radius:50%;background:var(--red);display:inline-block;margin-right:3px;vertical-align:1px}
+.owner-counts{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px;padding-top:7px;border-top:0.5px solid var(--border)}
+.owner-count{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;padding:2px 7px;border-radius:20px;background:var(--surface2);color:var(--text2);white-space:nowrap}
+.owner-count-num{font-weight:600;color:var(--text)}
+.owner-counts-clear{font-size:11px;color:var(--green-text);margin-top:7px;padding-top:7px;border-top:0.5px solid var(--border);display:flex;align-items:center;gap:4px}
 .drive-btn{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text3);text-decoration:none;padding:3px 7px;border-radius:var(--r);border:0.5px solid transparent;transition:all .15s;white-space:nowrap}
 .drive-btn:hover{background:var(--blue-bg);color:var(--blue-text);border-color:var(--blue-text)}
 .drive-btn svg{width:12px;height:12px;flex-shrink:0}
@@ -309,6 +313,11 @@ const JACOB_COLORS=["#B85A30","#3B6D11","#185FA5","#8F3456","#534AB7","#854F0B",
 const TAG_PALETTE=["#E53935","#D81B60","#8E24AA","#3949AB","#1E88E5","#00897B","#43A047","#F4511E","#F6BF26","#616161"];
 const ZAPIER_WEBHOOK="https://hooks.zapier.com/hooks/catch/11646010/42sgljl/";
 
+// Task ids that must never be pre-checked on a new client, even if they were
+// checked on the client the template was captured from. Add ids here to opt a
+// task out of the template permanently.
+const TEMPLATE_EXCLUDE=new Set(["capacity"]);
+
 const DEFAULT_PHASES=[
   {id:"pre",label:"Pre-start",tasks:[
     {id:"contract",name:"Contract signed",owner:"Partner",blocker:true},
@@ -370,9 +379,15 @@ const DEFAULT_STATE={
   phases:JSON.parse(JSON.stringify(DEFAULT_PHASES))
 };
 
+// Set to true by migrateState() when it finds and removes stale task ids, so we
+// can write the cleaned-up state back to Firebase once on load.
+let _prunedOnLoad=false;
+
 function migrateState(p){
   try{
     function toArr(v){if(!v)return[];if(Array.isArray(v))return v;return Object.values(v);}
+    p.neil.clients=toArr(p.neil.clients);
+    p.jacob.clients=toArr(p.jacob.clients);
     [...p.neil.clients,...p.jacob.clients].forEach(c=>{
       c.checked=toArr(c.checked);
       c.tags=toArr(c.tags);
@@ -383,10 +398,24 @@ function migrateState(p){
     p.tags=toArr(p.tags);
     p.template=toArr(p.template);
     if(!p.driveLinks)p.driveLinks={};
-    p.neil.clients=toArr(p.neil.clients);
-    p.jacob.clients=toArr(p.jacob.clients);
     const order=DEFAULT_PHASES.map(ph=>ph.id);
     p.phases.sort((a,b)=>{const ai=order.indexOf(a.id),bi=order.indexOf(b.id);if(ai===-1&&bi===-1)return 0;if(ai===-1)return 1;if(bi===-1)return-1;return ai-bi;});
+
+    // ── Prune orphaned task ids ───────────────────────────────────────────────
+    // If a task (or a whole phase) was deleted, its id could linger in a
+    // client's `checked` array. Those ghosts still counted toward "done" while
+    // the denominator shrank, which is what pushed a fully-checked client to
+    // 104%. Anything not backed by a real task is dropped, and duplicates go
+    // with it.
+    const validIds=new Set(p.phases.flatMap(ph=>ph.tasks.map(t=>t.id)));
+    [...p.neil.clients,...p.jacob.clients].forEach(c=>{
+      const before=c.checked.length;
+      c.checked=[...new Set(c.checked.filter(id=>validIds.has(id)))];
+      if(c.checked.length!==before)_prunedOnLoad=true;
+    });
+    const tplBefore=p.template.length;
+    p.template=[...new Set(p.template.filter(id=>validIds.has(id)&&!TEMPLATE_EXCLUDE.has(id)))];
+    if(p.template.length!==tplBefore)_prunedOnLoad=true;
   }catch(e){console.error("migrate error",e);}
   return p;
 }
@@ -434,6 +463,8 @@ function startApp(){
       _initialized=true;
       ST.phases.forEach(p=>openPhases[p.id]=true);
       render();
+      // Persist the cleanup so the stale ids don't come back on the next load.
+      if(_prunedOnLoad){_prunedOnLoad=false;save();}
     } else {
       const anyFocused=document.activeElement&&(document.activeElement.tagName==="INPUT"||document.activeElement.tagName==="TEXTAREA");
       if(!anyFocused){
@@ -509,12 +540,38 @@ function startedOrStarts(s){const d=daysUntil(s);if(d===null)return"";return d<0
 function driveSvg(cls){return`<svg class="${cls}" viewBox="0 0 87.3 78" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="m6.6 66.85 3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8h-27.5c0 1.55.4 3.1 1.2 4.5z" fill="#0066da"/><path d="m43.65 25-13.75-23.8c-1.35.8-2.5 1.9-3.3 3.3l-25.4 44a9.06 9.06 0 0 0 -1.2 4.5h27.5z" fill="#00ac47"/><path d="m73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5h-27.502l5.852 11.5z" fill="#ea4335"/><path d="m43.65 25 13.75-23.8c-1.35-.8-2.9-1.2-4.5-1.2h-18.5c-1.6 0-3.15.45-4.5 1.2z" fill="#00832d"/><path d="m59.8 53h-32.3l-13.75 23.8c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.45 4.5-1.2z" fill="#2684fc"/><path d="m73.4 26.5-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3l-13.75 23.8 16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#ffba00"/></svg>`;}
 function partnerColor(){return partner==="neil"?"var(--neil)":"var(--jacob)";}
 function clients(){return ST[partner].clients;}
+
+// ── Progress math ─────────────────────────────────────────────────────────────
+// The numerator and denominator must be derived from the same source of truth
+// (ST.phases). Counting raw `checked.length` let stale ids inflate the total.
+function validTaskIds(){return new Set(ST.phases.flatMap(p=>p.tasks.map(t=>t.id)));}
 function totalTasks(){return ST.phases.reduce((a,p)=>a+p.tasks.length,0);}
-function doneCount(ci){return clients()[ci].checked.length;}
-function pct(ci){const t=totalTasks();return t?Math.round(doneCount(ci)/t*100):0;}
+function doneCount(ci){const valid=validTaskIds();return clients()[ci].checked.filter(id=>valid.has(id)).length;}
+function pct(ci){const t=totalTasks();if(!t)return 0;return Math.min(100,Math.round(doneCount(ci)/t*100));}
 function hasChecked(ci,tid){return clients()[ci].checked.includes(tid);}
 function toggle(ci,tid){const c=clients()[ci];const i=c.checked.indexOf(tid);if(i>=0)c.checked.splice(i,1);else c.checked.push(tid);save();}
 function pendingBlockers(ci){return ST.phases.flatMap(p=>p.tasks.filter(t=>t.blocker&&!hasChecked(ci,t.id)));}
+
+// Unchecked tasks for a client, grouped by whoever owns them. Returns entries in
+// OWNERS order first, then any legacy owner values, so the chips stay stable.
+function outstandingByOwner(ci){
+  const counts=new Map();
+  OWNERS.forEach(o=>counts.set(o,0));
+  ST.phases.forEach(p=>p.tasks.forEach(t=>{
+    if(hasChecked(ci,t.id))return;
+    const o=t.owner||"Unassigned";
+    counts.set(o,(counts.get(o)||0)+1);
+  }));
+  return [...counts.entries()].filter(([,n])=>n>0);
+}
+
+// Strip a set of task ids out of every client's progress and the template.
+// Called whenever tasks stop existing, so nothing is orphaned in the first place.
+function forgetTaskIds(ids){
+  const drop=new Set(ids);
+  [...ST.neil.clients,...ST.jacob.clients].forEach(c=>{c.checked=c.checked.filter(id=>!drop.has(id));});
+  ST.template=(ST.template||[]).filter(id=>!drop.has(id));
+}
 
 // ── Zapier notification ───────────────────────────────────────────────────────
 function notifyTextExpander(clientName, startDate){
@@ -570,8 +627,14 @@ function renderDashboard(m){
     const card=document.createElement("div");card.className="client-card";
     const tagHtml=(c.tags||[]).filter(id=>getTag(id)).map(id=>`<span class="ctag" style="background:${tagColor(id)}22;color:${tagColor(id)};border-color:${tagColor(id)}55" data-tagid="${id}">${tagName(id)}<span class="ctag-remove" data-remove="${id}">✕</span></span>`).join("");
     const warn=startWarningInfo(c.start);
+    // Only the Partner-owned tasks surface here. outstandingByOwner() still
+    // returns every owner, so restoring the other chips is a one-line change.
+    const partnerOwed=(outstandingByOwner(ci).find(([o])=>o==="Partner")||[,0])[1];
+    const ownerHtml=partnerOwed
+      ?`<div class="owner-counts"><span class="owner-count" title="${partnerOwed} outstanding for ${pname}">${pname}<span class="owner-count-num">${partnerOwed}</span></span></div>`
+      :`<div class="owner-counts-clear"><i class="ti ti-circle-check" style="font-size:11px" aria-hidden="true"></i> Nothing outstanding for ${pname}</div>`;
     const dateHtml=c.start?(warn?`<div class="cc-date-warn"><span class="soon-badge ${warn.cls}">${warn.label}</span><span style="color:var(--text3)">Starts ${c.start}</span></div>`:`<div class="cc-date">${startedOrStarts(c.start)} ${c.start}</div>`):`<div class="cc-date">&nbsp;</div>`;
-    card.innerHTML=`<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px"><div class="cc-name" style="flex:1">${c.name}</div><a class="drive-btn" href="${getLink(c.name)}" target="_blank" rel="noopener" title="${custom?"Direct folder link":"Search Drive for "+c.name}">${driveSvg("drive-svg")} ${custom?"Folder":"Drive"}</a></div>${dateHtml}<div class="cc-bar-bg"><div class="cc-bar-fill" style="width:${p}%;background:${c.color}"></div></div><div style="display:flex;align-items:center;justify-content:space-between"><span class="cc-pct" style="color:${c.color}">${p}%</span><span class="cc-meta">${doneCount(ci)}/${totalTasks()} tasks</span></div>${blk.length?`<div class="cc-meta" style="margin-top:5px"><span class="blocker-dot"></span>${blk.length} blocker${blk.length>1?"s":""} pending</div>`:'<div class="cc-meta" style="margin-top:5px;color:var(--green-text)"><i class="ti ti-check" style="font-size:11px" aria-hidden="true"></i> No blockers</div>'}<div class="client-tags">${tagHtml}<button class="ctag-add" data-ci="${ci}"><i class="ti ti-tag" style="font-size:10px" aria-hidden="true"></i> Tag</button></div><div class="drive-link-row">${custom?`<span class="drive-link-saved"><i class="ti ti-link" style="font-size:10px"></i> Folder linked</span><button class="drive-clear-btn" data-client="${c.name}" title="Remove custom link">✕</button>`:`<i class="ti ti-link" style="font-size:11px;color:var(--text3);flex-shrink:0" aria-hidden="true"></i><input class="drive-link-input" placeholder="Paste Drive folder URL to save…" data-client="${c.name}" />`}</div>`;
+    card.innerHTML=`<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px"><div class="cc-name" style="flex:1">${c.name}</div><a class="drive-btn" href="${getLink(c.name)}" target="_blank" rel="noopener" title="${custom?"Direct folder link":"Search Drive for "+c.name}">${driveSvg("drive-svg")} ${custom?"Folder":"Drive"}</a></div>${dateHtml}<div class="cc-bar-bg"><div class="cc-bar-fill" style="width:${p}%;background:${c.color}"></div></div><div style="display:flex;align-items:center;justify-content:space-between"><span class="cc-pct" style="color:${c.color}">${p}%</span><span class="cc-meta">${doneCount(ci)}/${totalTasks()} tasks</span></div>${blk.length?`<div class="cc-meta" style="margin-top:5px"><span class="blocker-dot"></span>${blk.length} blocker${blk.length>1?"s":""} pending</div>`:'<div class="cc-meta" style="margin-top:5px;color:var(--green-text)"><i class="ti ti-check" style="font-size:11px" aria-hidden="true"></i> No blockers</div>'}${ownerHtml}<div class="client-tags">${tagHtml}<button class="ctag-add" data-ci="${ci}"><i class="ti ti-tag" style="font-size:10px" aria-hidden="true"></i> Tag</button></div><div class="drive-link-row">${custom?`<span class="drive-link-saved"><i class="ti ti-link" style="font-size:10px"></i> Folder linked</span><button class="drive-clear-btn" data-client="${c.name}" title="Remove custom link">✕</button>`:`<i class="ti ti-link" style="font-size:11px;color:var(--text3);flex-shrink:0" aria-hidden="true"></i><input class="drive-link-input" placeholder="Paste Drive folder URL to save…" data-client="${c.name}" />`}</div>`;
     card.addEventListener("click",(e)=>{if(e.target.closest(".drive-btn")||e.target.closest(".drive-link-input")||e.target.closest(".drive-clear-btn")||e.target.closest(".ctag-add")||e.target.closest(".ctag-remove")||e.target.closest(".tag-dropdown"))return;setView("client",ci);});
     card.querySelector(".ctag-add").addEventListener("click",e=>{e.stopPropagation();renderTagDropdown(card,ci);});
     card.querySelectorAll(".ctag-remove").forEach(btn=>btn.addEventListener("click",e=>{e.stopPropagation();toggleClientTag(ci,btn.dataset.remove);const mm=document.getElementById("main");mm.innerHTML="";renderDashboard(mm);}));
@@ -587,7 +650,7 @@ function renderDashboard(m){
   h=document.createElement("div");h.className="dash-section-hd";h.innerHTML=`<h2>Progress by phase ${badge}</h2><div class="divider"></div>`;m.appendChild(h);
   const pg=document.createElement("div");pg.className="phase-overview-grid";
   const filteredClients=visibleClients.map(({c})=>c);
-  ST.phases.forEach(phase=>{const base=filteredClients.length||clients().length;const total=phase.tasks.length*base;const done=filteredClients.reduce((s,c)=>s+phase.tasks.filter(t=>c.checked.includes(t.id)).length,0);const p=total?Math.round(done/total*100):0;const card=document.createElement("div");card.className="phase-card";card.innerHTML=`<div class="phase-card-name">${phase.label}</div><div class="phase-card-sub">${phase.tasks.length} tasks</div><div class="cc-bar-bg"><div class="cc-bar-fill" style="width:${p}%;background:${partnerColor()}"></div></div><div style="font-size:11px;color:var(--text2);margin-top:4px">${done}/${total} completed</div>`;pg.appendChild(card);});
+  ST.phases.forEach(phase=>{const base=filteredClients.length||clients().length;const total=phase.tasks.length*base;const done=filteredClients.reduce((s,c)=>s+phase.tasks.filter(t=>c.checked.includes(t.id)).length,0);const p=total?Math.min(100,Math.round(done/total*100)):0;const card=document.createElement("div");card.className="phase-card";card.innerHTML=`<div class="phase-card-name">${phase.label}</div><div class="phase-card-sub">${phase.tasks.length} tasks</div><div class="cc-bar-bg"><div class="cc-bar-fill" style="width:${p}%;background:${partnerColor()}"></div></div><div style="font-size:11px;color:var(--text2);margin-top:4px">${done}/${total} completed</div>`;pg.appendChild(card);});
   m.appendChild(pg);
 }
 
@@ -610,12 +673,13 @@ function renderClient(m){
   if(cdl){cdl.addEventListener("click",()=>{saveLink(c.name,"");render();});}
   if(blk.length){const b=document.createElement("div");b.className="blocker-banner show";b.innerHTML=`<i class="ti ti-alert-triangle" aria-hidden="true"></i> ${blk.length} blocker${blk.length>1?"s":""} pending: ${blk.map(t=>t.name).join(", ")}`;m.appendChild(b);}
   const fr=document.createElement("div");fr.className="filter-row";
-  const isTemplate=ST.template.length&&ST.template.every(id=>clients()[activeCI].checked.includes(id))&&clients()[activeCI].checked.every(id=>ST.template.includes(id));
+  const curForTpl=clients()[activeCI].checked.filter(id=>!TEMPLATE_EXCLUDE.has(id));
+  const isTemplate=ST.template.length&&ST.template.every(id=>curForTpl.includes(id))&&curForTpl.every(id=>ST.template.includes(id));
   fr.innerHTML=`${["all","pending","done","blocker"].map(f=>`<button class="filter-btn${filter===f?" active":""}" data-f="${f}">${f==="blocker"?"Blockers first":f.charAt(0).toUpperCase()+f.slice(1)}</button>`).join("")}<button class="btn-sm" id="add-phase-btn" style="margin-left:auto"><i class="ti ti-folder-plus" aria-hidden="true"></i> Add phase</button><button class="btn-sm" id="set-template-btn" style="${isTemplate?"color:var(--green-text);border-color:var(--green)":"color:var(--text3)"}"><i class="ti ti-copy" aria-hidden="true"></i> ${isTemplate?"Default template":"Set as template"}</button><button class="btn-sm" id="reset-btn" style="color:var(--text3)"><i class="ti ti-refresh" aria-hidden="true"></i> Reset</button>`;
   fr.querySelectorAll(".filter-btn").forEach(btn=>btn.addEventListener("click",()=>{filter=btn.dataset.f;render();}));
   m.appendChild(fr);
   document.getElementById("add-phase-btn").addEventListener("click",()=>{document.getElementById("mp-name").value="";openModal("modal-phase");setTimeout(()=>document.getElementById("mp-name").focus(),50);});
-  document.getElementById("set-template-btn").addEventListener("click",()=>{ST.template=clients()[activeCI].checked.slice();save();render();});
+  document.getElementById("set-template-btn").addEventListener("click",()=>{ST.template=clients()[activeCI].checked.filter(id=>!TEMPLATE_EXCLUDE.has(id));save();render();});
   document.getElementById("reset-btn").addEventListener("click",()=>{if(confirm(`Reset all progress for ${c.name}?`)){clients()[activeCI].checked=[];save();render();}});
   ST.phases.forEach((phase,pi)=>{
     let tasks=[...phase.tasks];
@@ -628,7 +692,9 @@ function renderClient(m){
     hd.innerHTML=`<i class="ti ti-chevron-right phase-chevron${open?" open":""}" aria-hidden="true"></i><input class="phase-name-edit" value="${phase.label}" /><span class="phase-prog">${phaseDone}/${phase.tasks.length}</span><button class="icon-btn del" style="opacity:.4;flex-shrink:0" title="Delete phase"><i class="ti ti-trash" aria-hidden="true"></i></button>`;
     hd.querySelector(".phase-chevron").addEventListener("click",()=>{openPhases[phase.id]=!openPhases[phase.id];render();});
     const ni=hd.querySelector(".phase-name-edit");ni.addEventListener("change",()=>{phase.label=ni.value;save();});ni.addEventListener("click",e=>e.stopPropagation());
-    hd.querySelector(".icon-btn").addEventListener("click",e=>{e.stopPropagation();if(confirm(`Delete phase "${phase.label}"?`)){ST.phases.splice(pi,1);save();render();}});
+    // Deleting a phase also clears its task ids from every client, otherwise
+    // those ids linger as "done" against a smaller denominator.
+    hd.querySelector(".icon-btn").addEventListener("click",e=>{e.stopPropagation();if(confirm(`Delete phase "${phase.label}"?`)){const removed=phase.tasks.map(t=>t.id);ST.phases.splice(pi,1);forgetTaskIds(removed);save();render();}});
     block.appendChild(hd);
     if(open){
       const list=document.createElement("div");list.className="task-list";
@@ -642,7 +708,7 @@ function renderClient(m){
         row.querySelector(".owner-badge").addEventListener("click",e=>{e.stopPropagation();const sel=document.createElement("select");sel.className="owner-select";OWNERS.forEach(o=>{const opt=document.createElement("option");opt.value=o;opt.textContent=o;if(o===task.owner)opt.selected=true;sel.appendChild(opt);});e.target.replaceWith(sel);sel.focus();sel.addEventListener("change",()=>{task.owner=sel.value;save();render();});sel.addEventListener("blur",()=>render());});
         row.querySelector("[data-action='reassign']").addEventListener("click",e=>{e.stopPropagation();reassignTask={phaseId:phase.id,taskId:task.id};document.getElementById("mr-phase").innerHTML=ST.phases.filter(p=>p.id!==phase.id).map(p=>`<option value="${p.id}">${p.label}</option>`).join("");openModal("modal-reassign");});
         row.querySelector("[data-action='blocker']").addEventListener("click",e=>{e.stopPropagation();task.blocker=!task.blocker;save();render();});
-        row.querySelector("[data-action='del']").addEventListener("click",e=>{e.stopPropagation();if(confirm(`Delete "${task.name}"?`)){phase.tasks=phase.tasks.filter(t=>t.id!==task.id);[...ST.neil.clients,...ST.jacob.clients].forEach(c=>{c.checked=c.checked.filter(id=>id!==task.id);});save();render();}});
+        row.querySelector("[data-action='del']").addEventListener("click",e=>{e.stopPropagation();if(confirm(`Delete "${task.name}"?`)){phase.tasks=phase.tasks.filter(t=>t.id!==task.id);forgetTaskIds([task.id]);save();render();}});
         row.addEventListener("dragstart",e=>{dragSrc={phaseId:phase.id,taskId:task.id};e.dataTransfer.effectAllowed="move";setTimeout(()=>row.style.opacity="0.4",0);});
         row.addEventListener("dragend",()=>row.style.opacity="");
         row.addEventListener("dragover",e=>{e.preventDefault();row.classList.add("drag-over");});
@@ -672,10 +738,11 @@ document.getElementById("mc-save").addEventListener("click",()=>{
         drv=document.getElementById("mc-drive").value.trim();
   if(!n)return;
   const colors=partner==="neil"?NEIL_COLORS:JACOB_COLORS;
+  const valid=validTaskIds();
   ST[partner].clients.push({
     name:n,start:d||"",
     color:colors[ST[partner].clients.length%colors.length],
-    checked:(ST.template||[]).slice(),
+    checked:(ST.template||[]).filter(id=>valid.has(id)&&!TEMPLATE_EXCLUDE.has(id)),
     tags:[],archived:false
   });
   if(drv.startsWith("http"))saveLink(n,drv);
