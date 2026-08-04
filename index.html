@@ -580,6 +580,16 @@ function parseStart(s){
 function daysUntil(s){const d=parseStart(s);if(!d)return null;const t=new Date();t.setHours(0,0,0,0);return Math.round((d-t)/(864e5));}
 function startWarningInfo(s){const d=daysUntil(s);if(d===null||d<0||d>START_WARNING_DAYS)return null;if(d===0)return{label:"Today",cls:"soon-today"};if(d===1)return{label:"Tomorrow",cls:"soon-tomorrow"};return{label:`In ${d} days`,cls:"soon-days"};}
 function startedOrStarts(s){const d=daysUntil(s);if(d===null)return"";return d<0?"Started":"Starts";}
+// Dashboard card order: earliest start date first, clients with no date last.
+// Operates on the {c, ci} pairs the dashboard builds, so the original index
+// stays attached and sorting can't misroute a click.
+function compareByStart(a,b){
+  const da=parseStart(a.c.start),db=parseStart(b.c.start);
+  if(!da&&!db)return a.ci-b.ci;
+  if(!da)return 1;
+  if(!db)return -1;
+  return (da-db)||(a.ci-b.ci);
+}
 function driveSvg(cls){return`<svg class="${cls}" viewBox="0 0 87.3 78" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="m6.6 66.85 3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8h-27.5c0 1.55.4 3.1 1.2 4.5z" fill="#0066da"/><path d="m43.65 25-13.75-23.8c-1.35.8-2.5 1.9-3.3 3.3l-25.4 44a9.06 9.06 0 0 0 -1.2 4.5h27.5z" fill="#00ac47"/><path d="m73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5h-27.502l5.852 11.5z" fill="#ea4335"/><path d="m43.65 25 13.75-23.8c-1.35-.8-2.9-1.2-4.5-1.2h-18.5c-1.6 0-3.15.45-4.5 1.2z" fill="#00832d"/><path d="m59.8 53h-32.3l-13.75 23.8c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.45 4.5-1.2z" fill="#2684fc"/><path d="m73.4 26.5-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3l-13.75 23.8 16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#ffba00"/></svg>`;}
 function partnerColor(){return partner==="neil"?"var(--neil)":"var(--jacob)";}
 // Task names are free text and can contain characters like the "<>" in
@@ -672,6 +682,7 @@ function renderDashboard(m){
   const grid=document.createElement("div");grid.className="dash-grid";
   let visibleClients=clients().map((c,ci)=>({c,ci})).filter(({c})=>!c.archived);
   if(activeTagFilters.size){visibleClients=visibleClients.filter(({c})=>[...activeTagFilters].every(tid=>(c.tags||[]).includes(tid)));}
+  visibleClients.sort(compareByStart);
   if(!visibleClients.length){const empty=document.createElement("div");empty.style.cssText="color:var(--text3);font-size:13px;padding:1rem 0;grid-column:1/-1";empty.textContent="No clients match the selected tags.";grid.appendChild(empty);}
   visibleClients.forEach(({c,ci})=>{
     const p=pct(ci),blk=pendingBlockers(ci),custom=isCustomLink(c.name);
