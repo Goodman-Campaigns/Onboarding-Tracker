@@ -653,11 +653,17 @@ function forgetTaskIds(ids){
 }
 
 // ── Zapier notification ───────────────────────────────────────────────────────
+// partner_key, task_id and client_param exist so the Zapier email can build a
+// working confirm.html link. client_param is pre-encoded because Zapier doesn't
+// URL-encode merge fields, and client names contain spaces (and sometimes "&").
 function notifyTextExpander(clientName, startDate){
   const body=new FormData();
   body.append("client_name",clientName);
   body.append("start_date",startDate||"TBD");
   body.append("partner_name",partner==="neil"?"Neil":"Jacob");
+  body.append("partner_key",partner);
+  body.append("task_id","text_exp");
+  body.append("client_param",encodeURIComponent(clientName));
   fetch(ZAPIER_WEBHOOK,{method:"POST",body}).catch(err=>console.error("Zapier error:",err));
 }
 
