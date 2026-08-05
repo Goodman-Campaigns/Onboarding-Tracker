@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="robots" content="noindex" />
+<title>Confirm task — Onboarding Tracker</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f9f8f6;--surface:#fff;--surface2:#f2f1ee;
+  --border:rgba(0,0,0,0.09);--border2:rgba(0,0,0,0.16);
+  --text:#1a1a18;--text2:#6b6a66;--text3:#a09f9b;
+  --green:#1D9E75;--green-bg:#E1F5EE;--green-text:#085041;
+  --red-bg:#FAECE7;--red-text:#993C1D;
+  --r:8px;--rl:12px;
+}
+@media(prefers-color-scheme:dark){:root{
+  --bg:#1a1a18;--surface:#242422;--surface2:#2e2e2b;
+  --border:rgba(255,255,255,0.09);--border2:rgba(255,255,255,0.16);
+  --text:#f0ede8;--text2:#9e9d99;--text3:#6b6a66;
+  --green-bg:#04342C;--green-text:#9FE1CB;
+  --red-bg:#4A1B0C;--red-text:#F0997B;
+}}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);
+  min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1.25rem}
+.card{background:var(--surface);border:0.5px solid var(--border2);border-radius:var(--rl);
+  padding:2rem;max-width:380px;width:100%;box-shadow:0 4px 24px rgba(0,0,0,.08)}
+.eyebrow{font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);margin-bottom:1.25rem}
+h1{font-size:18px;font-weight:600;margin-bottom:4px;line-height:1.35}
+.sub{font-size:13px;color:var(--text2);margin-bottom:1.5rem}
+.pill{display:inline-block;font-size:11px;font-weight:500;padding:2px 8px;border-radius:20px;
+  background:var(--surface2);color:var(--text2);margin-bottom:1.25rem}
+button{width:100%;padding:10px 16px;border-radius:var(--r);border:0.5px solid transparent;
+  font-size:14px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s}
+.btn-go{background:var(--green);color:#fff;border-color:var(--green)}
+.btn-go:hover:not(:disabled){opacity:.88}
+.btn-plain{background:var(--surface);color:var(--text);border-color:var(--border2)}
+.btn-plain:hover{background:var(--surface2)}
+button:disabled{opacity:.5;cursor:default}
+button:focus-visible{outline:2px solid var(--text);outline-offset:2px}
+button+button{margin-top:8px}
+.msg{font-size:12.5px;line-height:1.45;border-radius:var(--r);padding:9px 12px;margin-top:14px}
+.msg-err{background:var(--red-bg);color:var(--red-text)}
+.msg-ok{background:var(--green-bg);color:var(--green-text)}
+.note{font-size:13px;color:var(--text2);margin-bottom:1.25rem;line-height:1.5}
+a.back{display:inline-block;margin-top:1.25rem;font-size:12px;color:var(--text3);text-decoration:none}
+a.back:hover{color:var(--text2)}
+.spinner{width:22px;height:22px;border:2px solid var(--border2);border-top-color:var(--text2);
+  border-radius:50%;animation:spin .7s linear infinite;margin:0 auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+.gicon{width:18px;height:18px;vertical-align:-4px;margin-right:8px}
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <div class="eyebrow">Onboarding tracker</div>
+  <div id="view"><div class="spinner"></div></div>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, get, set } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+// Same project as index.html.
+const firebaseConfig = {
+  apiKey: "AIzaSyCNTmX8XnBQWm2GJM6kZdqNzvLbbSaYLZk",
+  authDomain: "internal-onboarding-a42e8.firebaseapp.com",
+  databaseURL: "https://internal-onboarding-a42e8-default-rtdb.firebaseio.com",
+  projectId: "internal-onboarding-a42e8",
+  storageBucket: "internal-onboarding-a42e8.firebasestorage.app",
+  messagingSenderId: "368721647535",
+  appId: "1:368721647535:web:5ad7ecb2dc7d7dbed8415a"
+};
+
+// Keep in sync with index.html.
+const ALLOWED_DOMAIN = "goodmancampaigns.com";
+function isAllowed(email){
+  return !!email && email.toLowerCase().endsWith("@"+ALLOWED_DOMAIN.toLowerCase());
+}
+
+const fbApp   = initializeApp(firebaseConfig);
+const db      = getDatabase(fbApp);
+const auth    = getAuth(fbApp);
+const provider= new GoogleAuthProvider();
+const view    = document.getElementById("view");
+
+const q          = new URLSearchParams(location.search);
+const partner    = (q.get("partner")||"").toLowerCase();   // "neil" | "jacob"
+const clientName = q.get("client")||"";
+const taskId     = q.get("task")||"";
+
+const esc = s => String(s??"").replace(/[&<>"']/g,
+  ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+
+// Firebase stores arrays as objects when keys are sparse, so normalize to
+// [key, value] pairs — the key is what the write path needs.
+const entriesOf = raw =>
+  Array.isArray(raw) ? raw.map((v,i)=>[String(i),v]) : Object.entries(raw||{});
+const arrOf = raw =>
+  !raw ? [] : (Array.isArray(raw) ? raw : Object.values(raw));
+
+if(!partner || !clientName || !taskId){
+  showError("This link is missing information. Open the tracker and check the task off there.");
+} else if(partner!=="neil" && partner!=="jacob"){
+  showError("That link points at a partner that doesn't exist.");
+} else {
+  onAuthStateChanged(auth, user => {
+    if(user && isAllowed(user.email)) loadTask(user);
+    else if(user){
+      showError(esc(user.email)+" isn't authorized for this workspace.");
+      signOut(auth);
+    }
+    else renderSignIn();
+  });
+}
+
+function showError(html){
+  view.innerHTML = `<div class="msg msg-err">${html}</div>
+    <a class="back" href="./">Open the tracker</a>`;
+}
+
+function renderSignIn(){
+  view.innerHTML = `
+    <h1>Sign in to continue</h1>
+    <div class="sub">Goodman Campaigns internal — use your work account.</div>
+    <button class="btn-plain" id="signin">
+      <svg class="gicon" viewBox="0 0 18 18" aria-hidden="true"><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.71-1.57 2.68-3.89 2.68-6.62z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.81.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.97 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.9 11.42 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/></svg>
+      Sign in with Google
+    </button>
+    <div id="err"></div>`;
+  document.getElementById("signin").onclick = () => {
+    signInWithPopup(auth, provider).catch(e => {
+      document.getElementById("err").innerHTML =
+        `<div class="msg msg-err">Sign-in failed: ${esc(e.message)}</div>`;
+    });
+  };
+}
+
+// Look up the task's display name from the shared phase definitions.
+function taskLabel(phases){
+  for(const ph of arrOf(phases)){
+    for(const t of arrOf(ph.tasks)){
+      if(t && t.id === taskId) return t.name;
+    }
+  }
+  return taskId;
+}
+
+async function loadTask(user){
+  view.innerHTML = `<div class="spinner"></div>`;
+  try{
+    const [clientsSnap, phasesSnap] = await Promise.all([
+      get(ref(db, `onboarding_v1/${partner}/clients`)),
+      get(ref(db, `onboarding_v1/phases`))
+    ]);
+
+    const label = taskLabel(phasesSnap.val());
+    const hit = entriesOf(clientsSnap.val()).find(([,c]) => c && c.name === clientName);
+
+    if(!hit){
+      showError(`No client named &ldquo;${esc(clientName)}&rdquo; under
+        ${partner==="neil"?"Neil":"Jacob"}. They may have been renamed.`);
+      return;
+    }
+
+    const [key, client] = hit;
+    if(arrOf(client.checked).includes(taskId)){
+      renderDone(label, client.name, true);
+      return;
+    }
+    renderConfirm(user, key, client, label);
+  }catch(e){
+    console.error(e);
+    showError("Couldn't reach the tracker. Check your connection and reload.");
+  }
+}
+
+function renderConfirm(user, key, client, label){
+  view.innerHTML = `
+    <div class="pill">${partner==="neil"?"Neil":"Jacob"}</div>
+    <h1>${esc(label)}</h1>
+    <div class="sub">${esc(client.name)}${client.start?` &middot; starts ${esc(client.start)}`:""}</div>
+    <button class="btn-go" id="go">Mark complete</button>
+    <div id="err"></div>
+    <a class="back" href="./">Open the tracker instead</a>`;
+
+  document.getElementById("go").onclick = async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    try{
+      // Re-read immediately before writing so a teammate's edit in the last few
+      // seconds isn't lost, then write ONLY this client's checked list. A full
+      // set() of onboarding_v1 here would overwrite the whole tracker.
+      const path = `onboarding_v1/${partner}/clients/${key}/checked`;
+      const fresh = arrOf((await get(ref(db, path))).val());
+      if(!fresh.includes(taskId)) fresh.push(taskId);
+      await set(ref(db, path), fresh);
+      renderDone(label, client.name, false);
+    }catch(e){
+      console.error(e);
+      btn.disabled = false;
+      btn.textContent = "Mark complete";
+      document.getElementById("err").innerHTML =
+        `<div class="msg msg-err">That didn't save. Try again, or check it off in the tracker.</div>`;
+    }
+  };
+}
+
+function renderDone(label, name, wasAlready){
+  view.innerHTML = `
+    <div class="pill">${partner==="neil"?"Neil":"Jacob"}</div>
+    <h1>${esc(label)}</h1>
+    <div class="sub">${esc(name)}</div>
+    <div class="msg msg-ok">${wasAlready
+      ? "Already checked off — nothing to do."
+      : "Marked complete. The tracker is updated for everyone."}</div>
+    <a class="back" href="./">Open the tracker</a>`;
+}
+</script>
+</body>
+</html>
