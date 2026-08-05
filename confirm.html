@@ -88,9 +88,11 @@ const provider= new GoogleAuthProvider();
 const view    = document.getElementById("view");
 
 const q          = new URLSearchParams(location.search);
-const partner    = (q.get("partner")||"").toLowerCase();   // "neil" | "jacob"
-const clientName = q.get("client")||"";
-const taskId     = q.get("task")||"";
+// Trimmed because merge fields can arrive with stray whitespace, and an
+// untrimmed id silently fails to match anything in the checklist.
+const partner    = (q.get("partner")||"").trim().toLowerCase();   // "neil" | "jacob"
+const clientName = (q.get("client")||"").trim();
+const taskId     = (q.get("task")||"").trim();
 
 const esc = s => String(s??"").replace(/[&<>"']/g,
   ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
@@ -146,7 +148,7 @@ function taskLabel(phases){
       if(t && t.id === taskId) return t.name;
     }
   }
-  return taskId;
+  return null;   // Unknown id — never write it; the app would prune it anyway.
 }
 
 async function loadTask(user){
@@ -158,6 +160,12 @@ async function loadTask(user){
     ]);
 
     const label = taskLabel(phasesSnap.val());
+    if(label === null){
+      showError(`No task with the id &ldquo;${esc(taskId)}&rdquo; exists in the
+        checklist, so there's nothing to check off. The link may be out of date.`);
+      return;
+    }
+
     const hit = entriesOf(clientsSnap.val()).find(([,c]) => c && c.name === clientName);
 
     if(!hit){
