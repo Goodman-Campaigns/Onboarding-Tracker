@@ -398,6 +398,13 @@ function migrateState(p){
       c.checked=toArr(c.checked);
       c.tags=toArr(c.tags);
       if(c.archived===undefined)c.archived=false;
+      if(!c.overrides||typeof c.overrides!=="object")c.overrides={};
+      c.overrides.hiddenTasks=toArr(c.overrides.hiddenTasks);
+      c.overrides.hiddenPhases=toArr(c.overrides.hiddenPhases);
+      if(!c.overrides.extraTasks||typeof c.overrides.extraTasks!=="object")c.overrides.extraTasks={};
+      Object.keys(c.overrides.extraTasks).forEach(k=>{c.overrides.extraTasks[k]=toArr(c.overrides.extraTasks[k]);});
+      c.overrides.extraPhases=toArr(c.overrides.extraPhases);
+      c.overrides.extraPhases.forEach(ph=>{ph.tasks=toArr(ph.tasks);});
     });
     p.phases=toArr(p.phases);
     p.phases.forEach(ph=>{ph.tasks=toArr(ph.tasks);});
@@ -414,9 +421,25 @@ function migrateState(p){
     // 104%. Anything not backed by a real task is dropped, and duplicates go
     // with it.
     const validIds=new Set(p.phases.flatMap(ph=>ph.tasks.map(t=>t.id)));
+    // A task id is valid for a client if it survives that client's overrides —
+    // so client-specific tasks count, and tasks they've removed don't.
+    function validForClient(c){
+      const o=c.overrides,hT=new Set(o.hiddenTasks),hP=new Set(o.hiddenPhases),ids=new Set();
+      p.phases.forEach(ph=>{
+        if(hP.has(ph.id))return;
+        ph.tasks.forEach(t=>{if(!hT.has(t.id))ids.add(t.id);});
+        (o.extraTasks[ph.id]||[]).forEach(t=>{if(!hT.has(t.id))ids.add(t.id);});
+      });
+      o.extraPhases.forEach(ph=>{
+        if(hP.has(ph.id))return;
+        toArr(ph.tasks).forEach(t=>{if(!hT.has(t.id))ids.add(t.id);});
+      });
+      return ids;
+    }
     [...p.neil.clients,...p.jacob.clients].forEach(c=>{
+      const mine=validForClient(c);
       const before=c.checked.length;
-      c.checked=[...new Set(c.checked.filter(id=>validIds.has(id)))];
+      c.checked=[...new Set(c.checked.filter(id=>mine.has(id)))];
       if(c.checked.length!==before)_needsRewrite=true;
     });
     const tplBefore=p.template.length;
@@ -437,8 +460,9 @@ function migrateState(p){
         c.blockersSet=true;
         _needsRewrite=true;
       }else{
+        const mine=validForClient(c);
         const before=toArr(c.blockers).length;
-        c.blockers=[...new Set(toArr(c.blockers).filter(id=>validIds.has(id)))];
+        c.blockers=[...new Set(toArr(c.blockers).filter(id=>mine.has(id)))];
         if(c.blockers.length!==before)_needsRewrite=true;
       }
     });
@@ -615,25 +639,104 @@ function partnerColor(){return partner==="neil"?"var(--neil)":"var(--jacob)";}
 function escHtml(s){return String(s).replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));}
 function clients(){return ST[partner].clients;}
 
+// ── Per-client checklist ──────────────────────────────────────────────────────
+// ST.phases stays the shared template and remains the source of truth. Each
+// client carries an `overrides` object recording only how they differ from it,
+// so adding a task to the template still reaches everyone, while removing one
+// from a client touches nobody else.
+function ovr(ci){
+  const c=clients()[ci];
+  if(!c.overrides||typeof c.overrides!=="object")c.overrides={};
+  const o=c.overrides;
+  if(!Array.isArray(o.hiddenTasks))o.hiddenTasks=[];
+  if(!Array.isArray(o.hiddenPhases))o.hiddenPhases=[];
+  if(!o.extraTasks||typeof o.extraTasks!=="object")o.extraTasks={};
+  if(!Array.isArray(o.extraPhases))o.extraPhases=[];
+  return o;
+}
+function phasesFor(ci){
+  const o=ovr(ci);
+  const hT=new Set(o.hiddenTasks),hP=new Set(o.hiddenPhases);
+  const shared=ST.phases.filter(p=>!hP.has(p.id)).map(p=>({
+    id:p.id,label:p.label,shared:true,
+    tasks:[
+      ...p.tasks.filter(t=>!hT.has(t.id)).map(t=>({...t,shared:true})),
+      ...(o.extraTasks[p.id]||[]).filter(t=>!hT.has(t.id)).map(t=>({...t,shared:false}))
+    ]
+  }));
+  const own=o.extraPhases.filter(p=>!hP.has(p.id)).map(p=>({
+    id:p.id,label:p.label,shared:false,
+    tasks:(p.tasks||[]).filter(t=>!hT.has(t.id)).map(t=>({...t,shared:false}))
+  }));
+  return [...shared,...own];
+}
+// phasesFor() hands back copies, so edits to a task's name or owner must be
+// written to the object they came from, not the copy on screen.
+function srcPhase(ci,pid){return ST.phases.find(p=>p.id===pid)||ovr(ci).extraPhases.find(p=>p.id===pid)||null;}
+function srcTaskList(ci,pid,tid){
+  const o=ovr(ci);
+  const sp=ST.phases.find(p=>p.id===pid);
+  if(sp&&sp.tasks.some(t=>t.id===tid))return sp.tasks;
+  const ex=o.extraTasks[pid];
+  if(ex&&ex.some(t=>t.id===tid))return ex;
+  const ep=o.extraPhases.find(p=>p.id===pid);
+  if(ep&&Array.isArray(ep.tasks)&&ep.tasks.some(t=>t.id===tid))return ep.tasks;
+  return null;
+}
+function srcTask(ci,pid,tid){const l=srcTaskList(ci,pid,tid);return l?l.find(t=>t.id===tid):null;}
+function visibleTaskIds(ci){const s=new Set();phasesFor(ci).forEach(p=>p.tasks.forEach(t=>s.add(t.id)));return s;}
+// Per-client sibling of forgetTaskIds() — clears progress for one client only.
+function forgetTaskIdsForClient(ci,ids){
+  const drop=new Set(ids),c=clients()[ci];
+  c.checked=c.checked.filter(id=>!drop.has(id));
+  if(Array.isArray(c.blockers))c.blockers=c.blockers.filter(id=>!drop.has(id));
+}
+function moveTask(ci,fromPid,taskId,toPid,beforeTaskId){
+  const o=ovr(ci);
+  const srcList=srcTaskList(ci,fromPid,taskId);
+  if(!srcList)return;
+  const task=srcList.find(t=>t.id===taskId);
+  const srcShared=ST.phases.some(p=>p.tasks===srcList);
+  const dstShared=ST.phases.find(p=>p.id===toPid);
+  let dstList;
+  if(srcShared){
+    if(!dstShared){alert("That task is on the shared checklist, so moving it into a phase only this client has would take it away from every other client. Remove it here and add it to the other phase instead.");return;}
+    dstList=dstShared.tasks;
+  }else if(dstShared){
+    if(!o.extraTasks[toPid])o.extraTasks[toPid]=[];
+    dstList=o.extraTasks[toPid];
+  }else{
+    const ep=o.extraPhases.find(p=>p.id===toPid);
+    if(!ep)return;
+    if(!Array.isArray(ep.tasks))ep.tasks=[];
+    dstList=ep.tasks;
+  }
+  srcList.splice(srcList.findIndex(t=>t.id===taskId),1);
+  let ti=dstList.length;
+  if(beforeTaskId){const j=dstList.findIndex(t=>t.id===beforeTaskId);if(j>=0)ti=j;}
+  dstList.splice(ti,0,task);
+  save();
+}
+
 // ── Progress math ─────────────────────────────────────────────────────────────
 // The numerator and denominator must be derived from the same source of truth
 // (ST.phases). Counting raw `checked.length` let stale ids inflate the total.
 function validTaskIds(){return new Set(ST.phases.flatMap(p=>p.tasks.map(t=>t.id)));}
-function totalTasks(){return ST.phases.reduce((a,p)=>a+p.tasks.length,0);}
-function doneCount(ci){const valid=validTaskIds();return clients()[ci].checked.filter(id=>valid.has(id)).length;}
-function pct(ci){const t=totalTasks();if(!t)return 0;return Math.min(100,Math.round(doneCount(ci)/t*100));}
+function totalTasks(ci){return phasesFor(ci===undefined?activeCI:ci).reduce((a,p)=>a+p.tasks.length,0);}
+function doneCount(ci){const valid=visibleTaskIds(ci);return clients()[ci].checked.filter(id=>valid.has(id)).length;}
+function pct(ci){const t=totalTasks(ci);if(!t)return 0;return Math.min(100,Math.round(doneCount(ci)/t*100));}
 function hasChecked(ci,tid){return clients()[ci].checked.includes(tid);}
 function toggle(ci,tid){const c=clients()[ci];const i=c.checked.indexOf(tid);if(i>=0)c.checked.splice(i,1);else c.checked.push(tid);save();}
 function isBlocker(ci,tid){const b=clients()[ci].blockers;return Array.isArray(b)&&b.includes(tid);}
 function toggleBlocker(ci,tid){const c=clients()[ci];if(!Array.isArray(c.blockers))c.blockers=[];const i=c.blockers.indexOf(tid);if(i>=0)c.blockers.splice(i,1);else c.blockers.push(tid);c.blockersSet=true;save();}
-function pendingBlockers(ci){return ST.phases.flatMap(p=>p.tasks.filter(t=>isBlocker(ci,t.id)&&!hasChecked(ci,t.id)));}
+function pendingBlockers(ci){return phasesFor(ci).flatMap(p=>p.tasks.filter(t=>isBlocker(ci,t.id)&&!hasChecked(ci,t.id)));}
 
 // Unchecked tasks for a client, grouped by whoever owns them. Returns entries in
 // OWNERS order first, then any legacy owner values, so the chips stay stable.
 function outstandingByOwner(ci){
   const counts=new Map();
   OWNERS.forEach(o=>counts.set(o,0));
-  ST.phases.forEach(p=>p.tasks.forEach(t=>{
+  phasesFor(ci).forEach(p=>p.tasks.forEach(t=>{
     if(hasChecked(ci,t.id))return;
     const o=t.owner||"Unassigned";
     counts.set(o,(counts.get(o)||0)+1);
@@ -724,7 +827,7 @@ function renderDashboard(m){
       ?`<div class="owner-counts"><span class="owner-count" title="${partnerOwed} outstanding for ${pname}">${pname}<span class="owner-count-num">${partnerOwed}</span></span></div>`
       :`<div class="owner-counts-clear"><i class="ti ti-circle-check" style="font-size:11px" aria-hidden="true"></i> Nothing outstanding for ${pname}</div>`;
     const dateHtml=c.start?(warn?`<div class="cc-date-warn"><span class="soon-badge ${warn.cls}">${warn.label}</span><span style="color:var(--text3)">Starts ${c.start}</span></div>`:`<div class="cc-date">${startedOrStarts(c.start)} ${c.start}</div>`):`<div class="cc-date">&nbsp;</div>`;
-    card.innerHTML=`<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px"><div class="cc-name" style="flex:1">${c.name}</div><a class="drive-btn" href="${getLink(c.name)}" target="_blank" rel="noopener" title="${custom?"Direct folder link":"Search Drive for "+c.name}">${driveSvg("drive-svg")} ${custom?"Folder":"Drive"}</a></div>${dateHtml}<div class="cc-bar-bg"><div class="cc-bar-fill" style="width:${p}%;background:${c.color}"></div></div><div style="display:flex;align-items:center;justify-content:space-between"><span class="cc-pct" style="color:${c.color}">${p}%</span><span class="cc-meta">${doneCount(ci)}/${totalTasks()} tasks</span></div>${blockerHtml}${ownerHtml}<div class="client-tags">${tagHtml}<button class="ctag-add" data-ci="${ci}"><i class="ti ti-tag" style="font-size:10px" aria-hidden="true"></i> Tag</button></div><div class="drive-link-row">${custom?`<span class="drive-link-saved"><i class="ti ti-link" style="font-size:10px"></i> Folder linked</span><button class="drive-clear-btn" data-client="${c.name}" title="Remove custom link">✕</button>`:`<i class="ti ti-link" style="font-size:11px;color:var(--text3);flex-shrink:0" aria-hidden="true"></i><input class="drive-link-input" placeholder="Paste Drive folder URL to save…" data-client="${c.name}" />`}</div>`;
+    card.innerHTML=`<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px"><div class="cc-name" style="flex:1">${escHtml(c.name)}</div><a class="drive-btn" href="${getLink(c.name)}" target="_blank" rel="noopener" title="${custom?"Direct folder link":"Search Drive for "+c.name}">${driveSvg("drive-svg")} ${custom?"Folder":"Drive"}</a></div>${dateHtml}<div class="cc-bar-bg"><div class="cc-bar-fill" style="width:${p}%;background:${c.color}"></div></div><div style="display:flex;align-items:center;justify-content:space-between"><span class="cc-pct" style="color:${c.color}">${p}%</span><span class="cc-meta">${doneCount(ci)}/${totalTasks(ci)} tasks</span></div>${blockerHtml}${ownerHtml}<div class="client-tags">${tagHtml}<button class="ctag-add" data-ci="${ci}"><i class="ti ti-tag" style="font-size:10px" aria-hidden="true"></i> Tag</button></div><div class="drive-link-row">${custom?`<span class="drive-link-saved"><i class="ti ti-link" style="font-size:10px"></i> Folder linked</span><button class="drive-clear-btn" data-client="${c.name}" title="Remove custom link">✕</button>`:`<i class="ti ti-link" style="font-size:11px;color:var(--text3);flex-shrink:0" aria-hidden="true"></i><input class="drive-link-input" placeholder="Paste Drive folder URL to save…" data-client="${c.name}" />`}</div>`;
     card.addEventListener("click",(e)=>{if(e.target.closest(".drive-btn")||e.target.closest(".drive-link-input")||e.target.closest(".drive-clear-btn")||e.target.closest(".ctag-add")||e.target.closest(".ctag-remove")||e.target.closest(".tag-dropdown"))return;setView("client",ci);});
     card.querySelector(".ctag-add").addEventListener("click",e=>{e.stopPropagation();renderTagDropdown(card,ci);});
     card.querySelectorAll(".ctag-remove").forEach(btn=>btn.addEventListener("click",e=>{e.stopPropagation();toggleClientTag(ci,btn.dataset.remove);const mm=document.getElementById("main");mm.innerHTML="";renderDashboard(mm);}));
@@ -736,24 +839,41 @@ function renderDashboard(m){
   });
   m.appendChild(grid);
   const archived=clients().map((c,ci)=>({c,ci})).filter(({c})=>c.archived);
-  if(archived.length){const ab=document.createElement("div");ab.className="archive-banner";ab.innerHTML=`<i class="ti ti-archive" aria-hidden="true"></i><span>${archived.length} archived client${archived.length>1?"s":""}</span><i class="ti ti-chevron-${showArchive?"up":"down"}" style="margin-left:auto" aria-hidden="true"></i>`;ab.addEventListener("click",()=>{showArchive=!showArchive;const mm=document.getElementById("main");mm.innerHTML="";renderDashboard(mm);});m.appendChild(ab);if(showArchive){const ag=document.createElement("div");ag.className="archive-grid";archived.forEach(({c,ci})=>{const p=pct(ci);const card=document.createElement("div");card.className="archive-card";card.innerHTML=`<div class="cc-name">${c.name}</div><div class="cc-date">${c.start||"No start date"}</div><div class="cc-bar-bg"><div class="cc-bar-fill" style="width:${p}%;background:${c.color}"></div></div><div style="font-size:12px;color:var(--text2);margin-top:4px">${doneCount(ci)}/${totalTasks()} tasks completed</div><button class="unarchive-btn">↩ Restore client</button>`;card.querySelector(".unarchive-btn").addEventListener("click",e=>{e.stopPropagation();unarchiveClient(ci);const mm=document.getElementById("main");mm.innerHTML="";renderDashboard(mm);});ag.appendChild(card);});m.appendChild(ag);}}
+  if(archived.length){const ab=document.createElement("div");ab.className="archive-banner";ab.innerHTML=`<i class="ti ti-archive" aria-hidden="true"></i><span>${archived.length} archived client${archived.length>1?"s":""}</span><i class="ti ti-chevron-${showArchive?"up":"down"}" style="margin-left:auto" aria-hidden="true"></i>`;ab.addEventListener("click",()=>{showArchive=!showArchive;const mm=document.getElementById("main");mm.innerHTML="";renderDashboard(mm);});m.appendChild(ab);if(showArchive){const ag=document.createElement("div");ag.className="archive-grid";archived.forEach(({c,ci})=>{const p=pct(ci);const card=document.createElement("div");card.className="archive-card";card.innerHTML=`<div class="cc-name">${c.name}</div><div class="cc-date">${c.start||"No start date"}</div><div class="cc-bar-bg"><div class="cc-bar-fill" style="width:${p}%;background:${c.color}"></div></div><div style="font-size:12px;color:var(--text2);margin-top:4px">${doneCount(ci)}/${totalTasks(ci)} tasks completed</div><button class="unarchive-btn">↩ Restore client</button>`;card.querySelector(".unarchive-btn").addEventListener("click",e=>{e.stopPropagation();unarchiveClient(ci);const mm=document.getElementById("main");mm.innerHTML="";renderDashboard(mm);});ag.appendChild(card);});m.appendChild(ag);}}
   h=document.createElement("div");h.className="dash-section-hd";h.innerHTML=`<h2>Progress by phase ${badge}</h2><div class="divider"></div>`;m.appendChild(h);
   const pg=document.createElement("div");pg.className="phase-overview-grid";
-  const filteredClients=visibleClients.map(({c})=>c);
-  ST.phases.forEach(phase=>{const base=filteredClients.length||clients().length;const total=phase.tasks.length*base;const done=filteredClients.reduce((s,c)=>s+phase.tasks.filter(t=>c.checked.includes(t.id)).length,0);const p=total?Math.min(100,Math.round(done/total*100)):0;const card=document.createElement("div");card.className="phase-card";card.innerHTML=`<div class="phase-card-name">${phase.label}</div><div class="phase-card-sub">${phase.tasks.length} tasks</div><div class="cc-bar-bg"><div class="cc-bar-fill" style="width:${p}%;background:${partnerColor()}"></div></div><div style="font-size:11px;color:var(--text2);margin-top:4px">${done}/${total} completed</div>`;pg.appendChild(card);});
+  // Clients can now differ, so the phase totals are summed per client rather
+  // than multiplied by a head count, and a phase only some clients have says so.
+  const idxs=visibleClients.length?visibleClients.map(({ci})=>ci):clients().map((c,i)=>i);
+  const phaseRows=[],seenPhase=new Set();
+  idxs.forEach(ci=>phasesFor(ci).forEach(ph=>{if(!seenPhase.has(ph.id)){seenPhase.add(ph.id);phaseRows.push({id:ph.id,label:ph.label});}}));
+  phaseRows.forEach(row=>{
+    let total=0,done=0,widest=0,usedBy=0;
+    idxs.forEach(ci=>{
+      const ph=phasesFor(ci).find(p=>p.id===row.id);
+      if(!ph)return;
+      usedBy++;total+=ph.tasks.length;widest=Math.max(widest,ph.tasks.length);
+      done+=ph.tasks.filter(t=>hasChecked(ci,t.id)).length;
+    });
+    const p=total?Math.min(100,Math.round(done/total*100)):0;
+    const sub=usedBy<idxs.length?`${widest} tasks · ${usedBy}/${idxs.length} clients`:`${widest} tasks`;
+    const card=document.createElement("div");card.className="phase-card";
+    card.innerHTML=`<div class="phase-card-name">${escHtml(row.label)}</div><div class="phase-card-sub">${sub}</div><div class="cc-bar-bg"><div class="cc-bar-fill" style="width:${p}%;background:${partnerColor()}"></div></div><div style="font-size:11px;color:var(--text2);margin-top:4px">${done}/${total} completed</div>`;
+    pg.appendChild(card);
+  });
   m.appendChild(pg);
 }
 
 // ── Client view ───────────────────────────────────────────────────────────────
 function renderClient(m){
   const c=clients()[activeCI],blk=pendingBlockers(activeCI),p=pct(activeCI);
-  const hdr=document.createElement("div");hdr.style.cssText="display:flex;align-items:center;gap:10px;margin-bottom:1rem";hdr.innerHTML=`<span style="width:10px;height:10px;border-radius:50%;background:${c.color};flex-shrink:0"></span><h1 style="font-size:20px;font-weight:600;margin:0">${c.name}</h1><span class="partner-badge badge-${partner}">${partner==="neil"?"Neil":"Jacob"}</span>`;m.appendChild(hdr);
+  const hdr=document.createElement("div");hdr.style.cssText="display:flex;align-items:center;gap:10px;margin-bottom:1rem";hdr.innerHTML=`<span style="width:10px;height:10px;border-radius:50%;background:${c.color};flex-shrink:0"></span><h1 style="font-size:20px;font-weight:600;margin:0">${escHtml(c.name)}</h1><span class="partner-badge badge-${partner}">${partner==="neil"?"Neil":"Jacob"}</span>`;m.appendChild(hdr);
   const sr=document.createElement("div");sr.className="stat-row";
   const customLink=isCustomLink(c.name);
   const clientWarn=startWarningInfo(c.start);
   const clientDateStr=c.start?(clientWarn?`<span class="soon-badge ${clientWarn.cls}" style="font-size:12px">${clientWarn.label}</span> Starts ${c.start}`:`${startedOrStarts(c.start)} ${c.start}`):"No start date";
   const clientTagHtml=(c.tags||[]).filter(id=>getTag(id)).map(id=>`<span class="ctag" style="background:${tagColor(id)}22;color:${tagColor(id)};border-color:${tagColor(id)}55">${tagName(id)}</span>`).join("")||`<span style="font-size:11px;color:var(--text3)">No tags</span>`;
-  sr.innerHTML=`<div class="stat"><div class="stat-lbl">Complete</div><div class="stat-val">${p}%</div><div class="stat-bar"><div class="stat-fill" style="width:${p}%;background:${c.color}"></div></div></div><div class="stat"><div class="stat-lbl">Tasks done</div><div class="stat-val">${doneCount(activeCI)} / ${totalTasks()}</div></div><div class="stat"><div class="stat-lbl">Start date <button class="edit-date-btn" id="edit-date-btn" title="Edit start date"><i class="ti ti-pencil" aria-hidden="true"></i></button></div><div style="font-size:13px;margin-top:4px;display:flex;align-items:center;gap:5px;flex-wrap:wrap" id="date-display">${clientDateStr}</div></div><div class="stat"><div class="stat-lbl">Tags</div><div class="client-tags" style="margin-top:5px">${clientTagHtml}</div></div><div class="stat"><div class="stat-lbl">Blockers pending</div><div class="stat-val" style="color:${blk.length?"var(--red)":"var(--green)"}">${blk.length}</div></div><div class="stat" style="display:flex;flex-direction:column;justify-content:center"><div class="stat-lbl">Google Drive ${customLink?'<span style="color:var(--green-text);font-size:10px">● linked</span>':'<span style="color:var(--text3);font-size:10px">● search</span>'}</div><a class="drive-btn-lg" href="${getLink(c.name)}" target="_blank" rel="noopener" style="margin-top:4px" title="${customLink?"Direct folder":"Search Drive for "+c.name}">${driveSvg("")} ${customLink?"Open folder":"Search Drive"}</a>${customLink?`<button style="font-size:10px;color:var(--text3);background:none;border:none;cursor:pointer;margin-top:4px;text-align:left;font-family:inherit" id="clear-drive-link">Remove custom link</button>`:`<input id="client-drive-input" style="font-size:11px;margin-top:5px;width:100%;background:transparent;border:none;border-bottom:0.5px solid var(--border2);outline:none;color:var(--text2);font-family:inherit;padding:2px 0" placeholder="Paste folder URL to save…" />`}</div>`;
+  sr.innerHTML=`<div class="stat"><div class="stat-lbl">Complete</div><div class="stat-val">${p}%</div><div class="stat-bar"><div class="stat-fill" style="width:${p}%;background:${c.color}"></div></div></div><div class="stat"><div class="stat-lbl">Tasks done</div><div class="stat-val">${doneCount(activeCI)} / ${totalTasks(activeCI)}</div></div><div class="stat"><div class="stat-lbl">Start date <button class="edit-date-btn" id="edit-date-btn" title="Edit start date"><i class="ti ti-pencil" aria-hidden="true"></i></button></div><div style="font-size:13px;margin-top:4px;display:flex;align-items:center;gap:5px;flex-wrap:wrap" id="date-display">${clientDateStr}</div></div><div class="stat"><div class="stat-lbl">Tags</div><div class="client-tags" style="margin-top:5px">${clientTagHtml}</div></div><div class="stat"><div class="stat-lbl">Blockers pending</div><div class="stat-val" style="color:${blk.length?"var(--red)":"var(--green)"}">${blk.length}</div></div><div class="stat" style="display:flex;flex-direction:column;justify-content:center"><div class="stat-lbl">Google Drive ${customLink?'<span style="color:var(--green-text);font-size:10px">● linked</span>':'<span style="color:var(--text3);font-size:10px">● search</span>'}</div><a class="drive-btn-lg" href="${getLink(c.name)}" target="_blank" rel="noopener" style="margin-top:4px" title="${customLink?"Direct folder":"Search Drive for "+c.name}">${driveSvg("")} ${customLink?"Open folder":"Search Drive"}</a>${customLink?`<button style="font-size:10px;color:var(--text3);background:none;border:none;cursor:pointer;margin-top:4px;text-align:left;font-family:inherit" id="clear-drive-link">Remove custom link</button>`:`<input id="client-drive-input" style="font-size:11px;margin-top:5px;width:100%;background:transparent;border:none;border-bottom:0.5px solid var(--border2);outline:none;color:var(--text2);font-family:inherit;padding:2px 0" placeholder="Paste folder URL to save…" />`}</div>`;
   m.appendChild(sr);
   const editDateBtn=document.getElementById("edit-date-btn");
   if(editDateBtn){editDateBtn.addEventListener("click",()=>{const display=document.getElementById("date-display");const inp=document.createElement("input");inp.className="date-edit-input";inp.value=c.start||"";inp.placeholder="e.g. 8/3 or Aug 3";display.innerHTML="";display.appendChild(inp);inp.focus();inp.select();const finish=()=>{updateStartDate(activeCI,inp.value.trim());render();};inp.addEventListener("blur",finish);inp.addEventListener("keydown",e=>{if(e.key==="Enter")finish();e.stopPropagation();});});}
@@ -761,7 +881,7 @@ function renderClient(m){
   if(cdi){cdi.addEventListener("paste",e=>{setTimeout(()=>{const v=cdi.value.trim();if(v.startsWith("http")){saveLink(c.name,v);render();}},0);});cdi.addEventListener("keydown",e=>{if(e.key==="Enter"){const v=cdi.value.trim();if(v.startsWith("http")){saveLink(c.name,v);render();}}});}
   const cdl=document.getElementById("clear-drive-link");
   if(cdl){cdl.addEventListener("click",()=>{saveLink(c.name,"");render();});}
-  if(blk.length){const b=document.createElement("div");b.className="blocker-banner show";b.innerHTML=`<i class="ti ti-alert-triangle" aria-hidden="true"></i> ${blk.length} blocker${blk.length>1?"s":""} pending: ${blk.map(t=>t.name).join(", ")}`;m.appendChild(b);}
+  if(blk.length){const b=document.createElement("div");b.className="blocker-banner show";b.innerHTML=`<i class="ti ti-alert-triangle" aria-hidden="true"></i> ${blk.length} blocker${blk.length>1?"s":""} pending: ${escHtml(blk.map(t=>t.name).join(", "))}`;m.appendChild(b);}
   const fr=document.createElement("div");fr.className="filter-row";
   const curForTpl=clients()[activeCI].checked.filter(id=>!TEMPLATE_EXCLUDE.has(id));
   const isTemplate=ST.template.length&&ST.template.every(id=>curForTpl.includes(id))&&curForTpl.every(id=>ST.template.includes(id));
@@ -771,42 +891,42 @@ function renderClient(m){
   document.getElementById("add-phase-btn").addEventListener("click",()=>{document.getElementById("mp-name").value="";openModal("modal-phase");setTimeout(()=>document.getElementById("mp-name").focus(),50);});
   document.getElementById("set-template-btn").addEventListener("click",()=>{ST.template=clients()[activeCI].checked.filter(id=>!TEMPLATE_EXCLUDE.has(id));save();render();});
   document.getElementById("reset-btn").addEventListener("click",()=>{if(confirm(`Reset all progress for ${c.name}?`)){clients()[activeCI].checked=[];save();render();}});
-  ST.phases.forEach((phase,pi)=>{
+  phasesFor(activeCI).forEach(phase=>{
     let tasks=[...phase.tasks];
     if(filter==="pending")tasks=tasks.filter(t=>!hasChecked(activeCI,t.id));
     if(filter==="done")tasks=tasks.filter(t=>hasChecked(activeCI,t.id));
     if(filter==="blocker")tasks=[...tasks.filter(t=>isBlocker(activeCI,t.id)&&!hasChecked(activeCI,t.id)),...tasks.filter(t=>!isBlocker(activeCI,t.id)||hasChecked(activeCI,t.id))];
-    const open=openPhases[phase.id];const phaseDone=phase.tasks.filter(t=>hasChecked(activeCI,t.id)).length;
+    const open=openPhases[phase.id]===undefined?true:openPhases[phase.id];const phaseDone=phase.tasks.filter(t=>hasChecked(activeCI,t.id)).length;
     const block=document.createElement("div");block.className="phase-block";
     const hd=document.createElement("div");hd.className="phase-hd";
-    hd.innerHTML=`<i class="ti ti-chevron-right phase-chevron${open?" open":""}" aria-hidden="true"></i><input class="phase-name-edit" value="${phase.label}" /><span class="phase-prog">${phaseDone}/${phase.tasks.length}</span><button class="icon-btn del" style="opacity:.4;flex-shrink:0" title="Delete phase"><i class="ti ti-trash" aria-hidden="true"></i></button>`;
-    hd.querySelector(".phase-chevron").addEventListener("click",()=>{openPhases[phase.id]=!openPhases[phase.id];render();});
-    const ni=hd.querySelector(".phase-name-edit");ni.addEventListener("change",()=>{phase.label=ni.value;save();});ni.addEventListener("click",e=>e.stopPropagation());
+    hd.innerHTML=`<i class="ti ti-chevron-right phase-chevron${open?" open":""}" aria-hidden="true"></i><input class="phase-name-edit" value="${escHtml(phase.label)}" /><span class="phase-prog">${phaseDone}/${phase.tasks.length}</span><button class="icon-btn del" style="opacity:.4;flex-shrink:0" title="Delete phase"><i class="ti ti-trash" aria-hidden="true"></i></button>`;
+    hd.querySelector(".phase-chevron").addEventListener("click",()=>{openPhases[phase.id]=!open;render();});
+    const ni=hd.querySelector(".phase-name-edit");ni.addEventListener("change",()=>{const sp=srcPhase(activeCI,phase.id);if(sp){sp.label=ni.value;save();}});ni.addEventListener("click",e=>e.stopPropagation());
     // Deleting a phase also clears its task ids from every client, otherwise
     // those ids linger as "done" against a smaller denominator.
-    hd.querySelector(".icon-btn").addEventListener("click",e=>{e.stopPropagation();if(confirm(`Delete phase "${phase.label}"?`)){const removed=phase.tasks.map(t=>t.id);ST.phases.splice(pi,1);forgetTaskIds(removed);save();render();}});
+    hd.querySelector(".icon-btn").addEventListener("click",e=>{e.stopPropagation();if(confirm(`Remove phase "${phase.label}" from ${c.name}? Other clients keep it.`)){const o=ovr(activeCI);if(phase.shared){if(!o.hiddenPhases.includes(phase.id))o.hiddenPhases.push(phase.id);}else{o.extraPhases=o.extraPhases.filter(p=>p.id!==phase.id);}forgetTaskIdsForClient(activeCI,phase.tasks.map(t=>t.id));save();render();}});
     block.appendChild(hd);
     if(open){
       const list=document.createElement("div");list.className="task-list";
       tasks.forEach(task=>{
         const done=hasChecked(activeCI,task.id);const isBlk=isBlocker(activeCI,task.id);const row=document.createElement("div");row.className=`task-row${done?" done":""}`;row.draggable=true;
-        row.innerHTML=`<i class="ti ti-grip-vertical drag-handle" aria-hidden="true"></i><div class="task-check"><i class="ti ti-check" aria-hidden="true"></i></div><div class="task-body"><span class="task-name-text">${task.name}</span>${isBlk && !done?'<span class="tag tag-blocker"><i class="ti ti-alert-circle" aria-hidden="true"></i> blocker</span>':""}<span class="owner-badge">${task.owner}</span></div><div class="task-actions"><button class="icon-btn" title="Edit task name" data-action="edit"><i class="ti ti-pencil" aria-hidden="true"></i></button><button class="icon-btn" title="Move to another phase" data-action="reassign"><i class="ti ti-arrows-move" aria-hidden="true"></i></button><button class="icon-btn${isBlk?" is-red":""}" title="${isBlk?"Remove blocker for "+c.name:"Mark as blocker for "+c.name}" data-action="blocker"><i class="ti ti-alert-circle" aria-hidden="true"></i></button><button class="icon-btn del" title="Delete task" data-action="del"><i class="ti ti-trash" aria-hidden="true"></i></button></div>`;
+        row.innerHTML=`<i class="ti ti-grip-vertical drag-handle" aria-hidden="true"></i><div class="task-check"><i class="ti ti-check" aria-hidden="true"></i></div><div class="task-body"><span class="task-name-text">${escHtml(task.name)}</span>${isBlk && !done?'<span class="tag tag-blocker"><i class="ti ti-alert-circle" aria-hidden="true"></i> blocker</span>':""}<span class="owner-badge">${escHtml(task.owner)}</span></div><div class="task-actions"><button class="icon-btn" title="Edit task name" data-action="edit"><i class="ti ti-pencil" aria-hidden="true"></i></button><button class="icon-btn" title="Move to another phase" data-action="reassign"><i class="ti ti-arrows-move" aria-hidden="true"></i></button><button class="icon-btn${isBlk?" is-red":""}" title="${isBlk?"Remove blocker for "+c.name:"Mark as blocker for "+c.name}" data-action="blocker"><i class="ti ti-alert-circle" aria-hidden="true"></i></button><button class="icon-btn del" title="Delete task" data-action="del"><i class="ti ti-trash" aria-hidden="true"></i></button></div>`;
         row.querySelector(".task-check").addEventListener("click",e=>{e.stopPropagation();toggle(activeCI,task.id);render();});
-        function startEditTaskName(){const inp=document.createElement("input");inp.className="task-name-input";inp.value=task.name;row.querySelector(".task-name-text").replaceWith(inp);inp.focus();inp.select();const fin=()=>{task.name=inp.value.trim()||task.name;save();render();};inp.addEventListener("blur",fin);inp.addEventListener("keydown",e=>{if(e.key==="Enter")fin();e.stopPropagation();});}
+        function startEditTaskName(){const inp=document.createElement("input");inp.className="task-name-input";inp.value=task.name;row.querySelector(".task-name-text").replaceWith(inp);inp.focus();inp.select();const fin=()=>{const st=srcTask(activeCI,phase.id,task.id);if(st)st.name=inp.value.trim()||st.name;save();render();};inp.addEventListener("blur",fin);inp.addEventListener("keydown",e=>{if(e.key==="Enter")fin();e.stopPropagation();});}
         row.querySelector(".task-name-text").addEventListener("dblclick",startEditTaskName);
         row.querySelector("[data-action='edit']").addEventListener("click",e=>{e.stopPropagation();startEditTaskName();});
-        row.querySelector(".owner-badge").addEventListener("click",e=>{e.stopPropagation();const sel=document.createElement("select");sel.className="owner-select";OWNERS.forEach(o=>{const opt=document.createElement("option");opt.value=o;opt.textContent=o;if(o===task.owner)opt.selected=true;sel.appendChild(opt);});e.target.replaceWith(sel);sel.focus();sel.addEventListener("change",()=>{task.owner=sel.value;save();render();});sel.addEventListener("blur",()=>render());});
-        row.querySelector("[data-action='reassign']").addEventListener("click",e=>{e.stopPropagation();reassignTask={phaseId:phase.id,taskId:task.id};document.getElementById("mr-phase").innerHTML=ST.phases.filter(p=>p.id!==phase.id).map(p=>`<option value="${p.id}">${p.label}</option>`).join("");openModal("modal-reassign");});
+        row.querySelector(".owner-badge").addEventListener("click",e=>{e.stopPropagation();const sel=document.createElement("select");sel.className="owner-select";OWNERS.forEach(o=>{const opt=document.createElement("option");opt.value=o;opt.textContent=o;if(o===task.owner)opt.selected=true;sel.appendChild(opt);});e.target.replaceWith(sel);sel.focus();sel.addEventListener("change",()=>{const st=srcTask(activeCI,phase.id,task.id);if(st)st.owner=sel.value;save();render();});sel.addEventListener("blur",()=>render());});
+        row.querySelector("[data-action='reassign']").addEventListener("click",e=>{e.stopPropagation();reassignTask={phaseId:phase.id,taskId:task.id};document.getElementById("mr-phase").innerHTML=phasesFor(activeCI).filter(p=>p.id!==phase.id).map(p=>`<option value="${p.id}">${escHtml(p.label)}</option>`).join("");openModal("modal-reassign");});
         row.querySelector("[data-action='blocker']").addEventListener("click",e=>{e.stopPropagation();toggleBlocker(activeCI,task.id);render();});
-        row.querySelector("[data-action='del']").addEventListener("click",e=>{e.stopPropagation();if(confirm(`Delete "${task.name}"?`)){phase.tasks=phase.tasks.filter(t=>t.id!==task.id);forgetTaskIds([task.id]);save();render();}});
+        row.querySelector("[data-action='del']").addEventListener("click",e=>{e.stopPropagation();if(confirm(`Remove "${task.name}" from ${c.name}? Other clients keep it.`)){const o=ovr(activeCI);if(task.shared){if(!o.hiddenTasks.includes(task.id))o.hiddenTasks.push(task.id);}else{const l=srcTaskList(activeCI,phase.id,task.id);if(l){const i=l.findIndex(t=>t.id===task.id);if(i>=0)l.splice(i,1);}}forgetTaskIdsForClient(activeCI,[task.id]);save();render();}});
         row.addEventListener("dragstart",e=>{dragSrc={phaseId:phase.id,taskId:task.id};e.dataTransfer.effectAllowed="move";setTimeout(()=>row.style.opacity="0.4",0);});
         row.addEventListener("dragend",()=>row.style.opacity="");
         row.addEventListener("dragover",e=>{e.preventDefault();row.classList.add("drag-over");});
         row.addEventListener("dragleave",()=>row.classList.remove("drag-over"));
-        row.addEventListener("drop",e=>{e.preventDefault();row.classList.remove("drag-over");if(!dragSrc||dragSrc.taskId===task.id)return;const sp=ST.phases.find(p=>p.id===dragSrc.phaseId),tp=ST.phases.find(p=>p.id===phase.id);const si=sp.tasks.findIndex(t=>t.id===dragSrc.taskId),ti2=tp.tasks.findIndex(t=>t.id===task.id);const[moved]=sp.tasks.splice(si,1);tp.tasks.splice(ti2,0,moved);dragSrc=null;save();render();});
+        row.addEventListener("drop",e=>{e.preventDefault();row.classList.remove("drag-over");if(!dragSrc||dragSrc.taskId===task.id)return;moveTask(activeCI,dragSrc.phaseId,dragSrc.taskId,phase.id,task.id);dragSrc=null;render();});
         list.appendChild(row);
       });
-      const ar=document.createElement("div");ar.className="add-task-row";ar.innerHTML=`<i class="ti ti-plus" style="color:var(--text3);font-size:14px" aria-hidden="true"></i><input class="add-task-input" placeholder="Add a task and press Enter…" />`;ar.querySelector("input").addEventListener("keydown",e=>{if(e.key==="Enter"&&e.target.value.trim()){phase.tasks.push({id:"t_"+Date.now(),name:e.target.value.trim(),owner:"Partner",blocker:false});save();render();}});
+      const ar=document.createElement("div");ar.className="add-task-row";ar.innerHTML=`<i class="ti ti-plus" style="color:var(--text3);font-size:14px" aria-hidden="true"></i><input class="add-task-input" placeholder="Add a task and press Enter…" />`;ar.querySelector("input").addEventListener("keydown",e=>{if(e.key==="Enter"&&e.target.value.trim()){const o=ovr(activeCI);const nt={id:"t_"+Date.now(),name:e.target.value.trim(),owner:"Partner",blocker:false};if(phase.shared){if(!o.extraTasks[phase.id])o.extraTasks[phase.id]=[];o.extraTasks[phase.id].push(nt);}else{const ep=o.extraPhases.find(p=>p.id===phase.id);if(ep){if(!Array.isArray(ep.tasks))ep.tasks=[];ep.tasks.push(nt);}}e.target.value="";save();render();}});
       list.appendChild(ar);block.appendChild(list);
     }
     m.appendChild(block);
@@ -835,6 +955,7 @@ document.getElementById("mc-save").addEventListener("click",()=>{
     checked:(ST.template||[]).filter(id=>valid.has(id)&&!TEMPLATE_EXCLUDE.has(id)),
     blockers:ST.phases.flatMap(p=>p.tasks.filter(t=>t.blocker).map(t=>t.id)),
     blockersSet:true,
+    overrides:{hiddenTasks:[],hiddenPhases:[],extraTasks:{},extraPhases:[]},
     tags:[],archived:false
   });
   if(drv.startsWith("http"))saveLink(n,drv);
@@ -844,9 +965,9 @@ document.getElementById("mc-save").addEventListener("click",()=>{
   notifyTextExpander(n, d);
 });
 document.getElementById("mp-cancel").addEventListener("click",()=>closeModal("modal-phase"));
-document.getElementById("mp-save").addEventListener("click",()=>{const n=document.getElementById("mp-name").value.trim();if(!n)return;const np={id:"ph_"+Date.now(),label:n,tasks:[]};ST.phases.push(np);openPhases[np.id]=true;save();closeModal("modal-phase");render();});
+document.getElementById("mp-save").addEventListener("click",()=>{const n=document.getElementById("mp-name").value.trim();if(!n)return;const np={id:"ph_"+Date.now(),label:n,tasks:[]};ovr(activeCI).extraPhases.push(np);openPhases[np.id]=true;save();closeModal("modal-phase");render();});
 document.getElementById("mr-cancel").addEventListener("click",()=>closeModal("modal-reassign"));
-document.getElementById("mr-save").addEventListener("click",()=>{if(!reassignTask)return;const tid=document.getElementById("mr-phase").value;const sp=ST.phases.find(p=>p.id===reassignTask.phaseId),tp=ST.phases.find(p=>p.id===tid);if(!sp||!tp)return;const i=sp.tasks.findIndex(t=>t.id===reassignTask.taskId);if(i<0)return;const[moved]=sp.tasks.splice(i,1);tp.tasks.push(moved);reassignTask=null;save();closeModal("modal-reassign");render();});
+document.getElementById("mr-save").addEventListener("click",()=>{if(!reassignTask)return;const tid=document.getElementById("mr-phase").value;moveTask(activeCI,reassignTask.phaseId,reassignTask.taskId,tid,null);reassignTask=null;closeModal("modal-reassign");render();});
 document.querySelectorAll(".modal-bg").forEach(bg=>bg.addEventListener("click",e=>{if(e.target===bg)bg.classList.remove("show");}));
 document.getElementById("mc-name").addEventListener("keydown",e=>{if(e.key==="Enter")document.getElementById("mc-save").click();});
 document.getElementById("mp-name").addEventListener("keydown",e=>{if(e.key==="Enter")document.getElementById("mp-save").click();});
