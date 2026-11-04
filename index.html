@@ -316,7 +316,7 @@ const OWNERS=["Partner","Elizabeth","Jessica"];
 const NEIL_COLORS=["#534AB7","#8F3456","#185FA5","#1D9E75","#B47015","#5F5E5A"];
 const JACOB_COLORS=["#B85A30","#3B6D11","#185FA5","#8F3456","#534AB7","#854F0B","#5F5E5A"];
 const TAG_PALETTE=["#E53935","#D81B60","#8E24AA","#3949AB","#1E88E5","#00897B","#43A047","#F4511E","#F6BF26","#616161"];
-const ZAPIER_WEBHOOK="https://hooks.zapier.com/hooks/catch/11646010/42sgljl/";
+const ZAPIER_WEBHOOK="https://script.google.com/macros/s/AKfycbynmjIYi-aijxG6hdcMyJ4L7UH4Jm4YNt8ofN__Mjk3tWjQC05Q2Rfs8Hy6w9G1YTXX3g/exec";
 
 // Task ids that must never be pre-checked on a new client, even if they were
 // checked on the client the template was captured from. Add ids here to opt a
@@ -767,7 +767,7 @@ function notifyTextExpander(clientName, startDate){
   body.append("partner_key",partner);
   body.append("task_id","text_exp");
   body.append("client_param",encodeURIComponent(clientName));
-  fetch(ZAPIER_WEBHOOK,{method:"POST",body}).catch(err=>console.error("Zapier error:",err));
+  fetch(ZAPIER_WEBHOOK,{method:"POST",body,mode:"no-cors"}).catch(err=>console.error("Webhook error:",err));
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
