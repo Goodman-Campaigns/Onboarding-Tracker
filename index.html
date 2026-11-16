@@ -332,6 +332,7 @@ const DEFAULT_PHASES=[
     {id:"google_alerts",name:"Google Alerts made for candidate, opponent & office",owner:"Partner",blocker:false},
     {id:"monday_sched",name:"Schedule created on monday.com",owner:"Jessica",blocker:false},
     {id:"capacity",name:"Correct on capacity planning",owner:"Partner",blocker:false},
+    {id:"combined_mapping",name:"Added to combined mapping sheet",owner:"Partner",blocker:false},
   ]},
   {id:"comms",label:"Communications setup",tasks:[
     {id:"onboard_meet",name:"Onboarding meeting scheduled",owner:"Partner",blocker:false},
@@ -411,6 +412,21 @@ function migrateState(p){
     p.tags=toArr(p.tags);
     p.template=toArr(p.template);
     if(!p.driveLinks)p.driveLinks={};
+    // ── One-time shared task additions ────────────────────────────────────────
+    // The live task list is stored in Firebase, so a task added to
+    // DEFAULT_PHASES only reaches existing data through here. Each entry is
+    // added once and recorded in `seededTasks`, so deleting it later in the
+    // UI sticks instead of it coming back on the next load.
+    const SEED_TASKS=[{phase:"pre",task:{id:"combined_mapping",name:"Added to combined mapping sheet",owner:"Partner",blocker:false}}];
+    if(!p.seededTasks||typeof p.seededTasks!=="object")p.seededTasks={};
+    SEED_TASKS.forEach(({phase,task})=>{
+      if(p.seededTasks[task.id])return;
+      const ph=p.phases.find(x=>x.id===phase);
+      if(ph&&!ph.tasks.some(t=>t.id===task.id))ph.tasks.push({...task});
+      p.seededTasks[task.id]=true;
+      _needsRewrite=true;
+    });
+
     const order=DEFAULT_PHASES.map(ph=>ph.id);
     p.phases.sort((a,b)=>{const ai=order.indexOf(a.id),bi=order.indexOf(b.id);if(ai===-1&&bi===-1)return 0;if(ai===-1)return 1;if(bi===-1)return-1;return ai-bi;});
 
