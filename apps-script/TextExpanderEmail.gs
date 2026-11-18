@@ -13,9 +13,15 @@
 //                     emails Jacob if that client could NOT get a snippet
 //                     automatically (one-word name, clash, common word).
 //   GET  ?key=FEED_KEY
-//     Returns every active client as a TextExpander snippet group
-//     (first + last initial → full name). Jacob subscribes to this URL once in
-//     TextExpander and new clients show up on their own.
+//     Returns clients added since the feed was switched on as a TextExpander
+//     snippet group (first + last initial → full name). Jacob subscribes to
+//     this URL once in TextExpander and new clients show up on their own.
+//
+// Clients already in Jacob's own TextExpander group are never put in the feed:
+// the first client list the script receives is saved as the "baseline" and
+// left out. Their initials still count as taken, as do any abbreviations
+// listed in TAKEN_ABBREVIATIONS, so a new client who clashes with one gets
+// an email instead of a duplicate snippet.
 //
 // The feed URL is the web app's /exec URL plus ?key=<FEED_KEY>. Without the key
 // it returns nothing, so the client list isn't readable by anyone who only
@@ -33,6 +39,11 @@ const FEED_KEY = "CHANGE-ME-to-a-long-random-string";
 // Put something here (e.g. ";") if the bare initials ever start firing while
 // typing normal words. Changing it re-keys every snippet in the feed.
 const ABBREV_PREFIX = "";
+
+// Abbreviations Jacob already uses in his own TextExpander group, from his
+// export. A new client whose initials are in here is emailed, not fed.
+// e.g. ["dm", "jw", "pc"]
+const TAKEN_ABBREVIATIONS = [];
 
 // Two-letter combos that are real words; a client whose initials match one of
 // these is left out of the feed (it would expand mid-sentence) and Jacob gets
@@ -58,12 +69,17 @@ function initialsFor(name) {
   return (words[0][0] + words[words.length - 1][0]).toLowerCase();
 }
 
-// Returns { snippets: [{abbr, name}], problems: {name: reason} }
+// Returns { snippets: [{abbr, name}], problems: {name: reason} }.
+// Baseline clients (already in Jacob's group) get no snippet and no problem,
+// but their initials count as taken.
 function buildSnippets(names) {
+  const baseline = new Set(loadBaseline());
+  const taken = new Set(TAKEN_ABBREVIATIONS.map(a => String(a).toLowerCase().replace(ABBREV_PREFIX, "")));
   const byAbbr = {};
   const problems = {};
   names.forEach(n => {
     const ab = initialsFor(n);
+    if (baseline.has(n)) { if (ab) (byAbbr[ab] = byAbbr[ab] || []).push(n); return; }
     if (!ab) { problems[n] = "one-word name, so there are no first/last initials"; return; }
     if (COMMON_WORDS.has(ab)) { problems[n] = `"${ab}" is a common word and would expand while typing`; return; }
     (byAbbr[ab] = byAbbr[ab] || []).push(n);
@@ -71,9 +87,12 @@ function buildSnippets(names) {
   const snippets = [];
   Object.keys(byAbbr).sort().forEach(ab => {
     const list = byAbbr[ab];
-    if (list.length === 1) { snippets.push({ abbr: ABBREV_PREFIX + ab, name: cleanName(list[0]) }); return; }
-    list.forEach(n => {
-      problems[n] = `shares initials "${ab}" with ${list.filter(x => x !== n).join(", ")}`;
+    const fresh = list.filter(n => !baseline.has(n));
+    fresh.forEach(n => {
+      const others = list.filter(x => x !== n);
+      if (others.length) problems[n] = `shares initials "${ab}" with ${others.join(", ")}`;
+      else if (taken.has(ab)) problems[n] = `"${ab}" is already one of Jacob's snippets`;
+      else snippets.push({ abbr: ABBREV_PREFIX + ab, name: cleanName(n) });
     });
   });
   return { snippets, problems };
@@ -89,6 +108,16 @@ function saveClients(json) {
   return list;
 }
 
+// The first list ever received = clients Jacob already has snippets for.
+function saveBaselineIfMissing(list) {
+  const props = PropertiesService.getScriptProperties();
+  if (!props.getProperty("baseline")) props.setProperty("baseline", JSON.stringify(list));
+}
+
+function loadBaseline() {
+  return JSON.parse(PropertiesService.getScriptProperties().getProperty("baseline") || "[]");
+}
+
 function loadClients() {
   return JSON.parse(PropertiesService.getScriptProperties().getProperty("clients") || "[]");
 }
@@ -97,6 +126,7 @@ function loadClients() {
 function doPost(e) {
   const p = (e && e.parameter) || {};
   const list = p.clients ? saveClients(p.clients) : null;
+  if (list && p.action === "sync") saveBaselineIfMissing(list);
   if (p.action === "sync") return ContentService.createTextOutput("ok");
 
   const partnerKey = String(p.partner_key || "").trim().toLowerCase();
@@ -179,6 +209,13 @@ function showFeedUrl() {
   const { snippets, problems } = buildSnippets(loadClients());
   Logger.log(snippets.length + " snippets:\n" + snippets.map(s => s.abbr + " → " + s.name).join("\n"));
   Logger.log("Left out (make by hand):\n" + Object.keys(problems).map(n => n + ": " + problems[n]).join("\n"));
+  Logger.log("Baseline (already in Jacob's group, not in feed): " + loadBaseline().length + " clients");
+}
+
+// Only if you need to start over: forgets the baseline so the next tracker
+// load re-captures it.
+function resetBaseline() {
+  PropertiesService.getScriptProperties().deleteProperty("baseline");
 }
 
 // Authorizes Gmail and emails YOU a sample of the hand-made-snippet email.
