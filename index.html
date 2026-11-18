@@ -531,6 +531,7 @@ function startApp(){
       render();
       // Persist the cleanup so the stale ids don't come back on the next load.
       if(_needsRewrite){_needsRewrite=false;save();}
+      syncTextExpander();
     } else {
       const anyFocused=document.activeElement&&(document.activeElement.tagName==="INPUT"||document.activeElement.tagName==="TEXTAREA");
       if(!anyFocused){
@@ -771,12 +772,28 @@ function forgetTaskIds(ids){
   ST.template=(ST.template||[]).filter(id=>!drop.has(id));
 }
 
-// ── New-client email (Google Apps Script web app) ─────────────────────────────────────────────────────
+// ── Text Expander feed + new-client email (Google Apps Script web app) ────────────────────────────────
+// The web app (apps-script/TextExpanderEmail.gs) keeps a copy of the active
+// client names and serves them to Jacob's TextExpander as a subscribed snippet
+// group. It only emails Jacob for clients it can't make a snippet for.
 // partner_key, task_id and client_param exist so the email can build a
 // working confirm.html link. client_param is pre-encoded because the old Zapier
 // flow didn't URL-encode merge fields, and client names contain spaces (and sometimes "&").
+function activeClientNames(){
+  return [...ST.neil.clients,...ST.jacob.clients].filter(c=>!c.archived).map(c=>c.name);
+}
+let _textExpanderSynced=false;
+function syncTextExpander(){
+  if(_textExpanderSynced)return;
+  _textExpanderSynced=true;
+  const body=new FormData();
+  body.append("action","sync");
+  body.append("clients",JSON.stringify(activeClientNames()));
+  fetch(NOTIFY_WEBHOOK,{method:"POST",body,mode:"no-cors"}).catch(err=>console.error("Webhook error:",err));
+}
 function notifyTextExpander(clientName, startDate){
   const body=new FormData();
+  body.append("clients",JSON.stringify(activeClientNames()));
   body.append("client_name",clientName);
   body.append("start_date",startDate||"TBD");
   body.append("partner_name",partner==="neil"?"Neil":"Jacob");
