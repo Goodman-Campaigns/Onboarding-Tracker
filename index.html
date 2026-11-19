@@ -742,7 +742,26 @@ function totalTasks(ci){return phasesFor(ci===undefined?activeCI:ci).reduce((a,p
 function doneCount(ci){const valid=visibleTaskIds(ci);return clients()[ci].checked.filter(id=>valid.has(id)).length;}
 function pct(ci){const t=totalTasks(ci);if(!t)return 0;return Math.min(100,Math.round(doneCount(ci)/t*100));}
 function hasChecked(ci,tid){return clients()[ci].checked.includes(tid);}
-function toggle(ci,tid){const c=clients()[ci];const i=c.checked.indexOf(tid);if(i>=0)c.checked.splice(i,1);else c.checked.push(tid);save();}
+function toggle(ci,tid){const c=clients()[ci];const i=c.checked.indexOf(tid);if(i>=0)c.checked.splice(i,1);else{c.checked.push(tid);onTaskChecked(c,tid);}save();}
+
+// ── Emails triggered by checking a task ───────────────────────────────────────
+// Each fires once per client: `emailsSent` remembers it, so unchecking and
+// re-checking the task doesn't send the email again.
+const TASK_EMAILS={dns:"dns_authorized"};
+function onTaskChecked(c,tid){
+  const event=TASK_EMAILS[tid];
+  if(!event)return;
+  if(!c.emailsSent||typeof c.emailsSent!=="object")c.emailsSent={};
+  if(c.emailsSent[tid])return;
+  c.emailsSent[tid]=true;
+  // The client goes in `client`, not `client_name`, so an older deployment of
+  // the Apps Script ignores this instead of sending a Text Expander email.
+  const body=new FormData();
+  body.append("event",event);
+  body.append("client",c.name);
+  body.append("partner_key",partner);
+  fetch(NOTIFY_WEBHOOK,{method:"POST",body,mode:"no-cors"}).catch(err=>console.error("Webhook error:",err));
+}
 function isBlocker(ci,tid){const b=clients()[ci].blockers;return Array.isArray(b)&&b.includes(tid);}
 function toggleBlocker(ci,tid){const c=clients()[ci];if(!Array.isArray(c.blockers))c.blockers=[];const i=c.blockers.indexOf(tid);if(i>=0)c.blockers.splice(i,1);else c.blockers.push(tid);c.blockersSet=true;save();}
 function pendingBlockers(ci){return phasesFor(ci).flatMap(p=>p.tasks.filter(t=>isBlocker(ci,t.id)&&!hasChecked(ci,t.id)));}
